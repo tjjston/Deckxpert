@@ -31,6 +31,9 @@ if (!IsGameNameValid($gameName)) {
 $playerID = $_POST["playerID"];
 $authKey = $_POST["authKey"];
 
+InitializeMatchSeed($gameName, $_POST);
+if(isset($_POST["logFormat"]) && $_POST["logFormat"] === "json") SetStructuredLogMode(true);
+
 //We should also have some information on the type of command
 $mode = $_POST["mode"];
 $submission = $_POST["submission"];
