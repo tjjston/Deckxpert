@@ -31,6 +31,54 @@ function RandomizeArray(&$arr, $skipSeed = false){
   }
 }
 
+function SetMatchSeed($seed, $persistGameName = "")
+{
+  global $matchSeed, $randomSeeded;
+  if($seed === null || $seed === "") return;
+  $matchSeed = strval($seed);
+  $randomSeeded = false;
+  if($persistGameName != "") {
+    @file_put_contents("./Games/{$persistGameName}/match_seed.txt", $matchSeed);
+  }
+}
+
+function LoadMatchSeed($gameName)
+{
+  if($gameName == "") return;
+  $filename = "./Games/{$gameName}/match_seed.txt";
+  if(file_exists($filename)) {
+    SetMatchSeed(trim(file_get_contents($filename)));
+  }
+}
+
+function DeriveSubSeed($scope, $index = 0)
+{
+  global $matchSeed;
+  if(!isset($matchSeed) || $matchSeed === "") return null;
+  return hash("sha256", $matchSeed . "|" . $scope . "|" . strval($index));
+}
+
+function InitializeMatchSeed($gameName = "", $jsonInput = null)
+{
+  LoadMatchSeed($gameName);
+  $seed = null;
+  if(is_array($jsonInput) && isset($jsonInput["seed"])) $seed = $jsonInput["seed"];
+  else if(isset($_POST["seed"])) $seed = $_POST["seed"];
+  else if(isset($_GET["seed"])) $seed = $_GET["seed"];
+  else {
+    global $argv;
+    if(isset($argv) && is_array($argv)) {
+      for($i = 0; $i < count($argv); ++$i) {
+        if($argv[$i] === "--seed" && isset($argv[$i + 1])) {
+          $seed = $argv[$i + 1];
+          break;
+        }
+      }
+    }
+  }
+  if($seed !== null && $seed !== "") SetMatchSeed($seed, $gameName);
+}
+
 function GetRandom($low=-1, $high=-1)
 {
   global $randomSeeded;
@@ -42,7 +90,12 @@ function GetRandom($low=-1, $high=-1)
 
 function SeedRandom()
 {
-  global $randomSeeded, $currentRound, $turn, $currentPlayer, $layers, $combatChain;
+  global $randomSeeded, $currentRound, $turn, $currentPlayer, $layers, $combatChain, $matchSeed;
+  if(isset($matchSeed) && $matchSeed !== "") {
+    mt_srand(crc32(hash("sha256", "match|" . $matchSeed)));
+    $randomSeeded = true;
+    return;
+  }
   $seedString = $currentRound. implode("", $turn) . $currentPlayer;
   if(count($layers) > 0) for($i=0; $i<count($layers); ++$i) $seedString .= $layers[$i];
   if(count($combatChain) > 0) for($i=0; $i<count($combatChain); ++$i) $seedString .= $combatChain[$i];
