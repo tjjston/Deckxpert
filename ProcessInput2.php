@@ -46,6 +46,9 @@ for ($i = 0; $i < $chkCount; ++$i) {
 
 $inputText = $_GET["inputText"] ?? "";
 
+InitializeMatchSeed($gameName);
+if (isset($_GET["logFormat"]) && $_GET["logFormat"] === "json") SetStructuredLogMode(true);
+
 SetHeaders();
 
 $numPass = 0;

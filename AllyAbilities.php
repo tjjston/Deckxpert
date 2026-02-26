@@ -484,7 +484,9 @@ function DestroyAlly($player, $index,
     $otherPlayer = $player == 1 ? 2 : 1;
     $triggers = GetAllyWhenDestroyTheirsEffects($mainPlayer, $otherPlayer, $uniqueID, $wasUnique, $isUpgraded, $upgradesWithOwnerData);
     if(count($triggers) > 0) {
-      LayerTheirsDestroyedTriggers($player, $triggers);
+      // These triggers belong to the opponent (their enemy unit was defeated),
+      // so they must be layered for $otherPlayer to preserve correct ordering.
+      LayerTheirsDestroyedTriggers($otherPlayer, $triggers);
     }
     IncrementClassState($player, $CS_NumAlliesDestroyed);
     AppendClassState($player, $CS_AlliesDestroyed, $cardID);
@@ -995,6 +997,9 @@ function AllyDestroyedAbility($player, $cardID, $uniqueID, $lostAbilities, $isUp
         break;
       case "7204838421"://Enterprising Lackeys
         $discardID = SearchDiscardForCard($player, $cardID);
+        // SearchDiscardForCard may return a comma-delimited list if multiple copies exist;
+        // this effect should operate on the specific just-defeated copy, so use one index.
+        if(str_contains($discardID, ",")) $discardID = explode(",", $discardID)[0];
         MZChooseAndDestroy($player, "MYRESOURCES", may:true, context:"Choose a resource to destroy");
         AddDecisionQueue("PASSPARAMETER", $player, "MYDISCARD-$discardID", 1);
         AddDecisionQueue("MZADDZONE", $player, "MYRESOURCESEXHAUSTED", 1);
