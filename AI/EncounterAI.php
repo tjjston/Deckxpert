@@ -3,6 +3,7 @@
 include "EncounterPriorityValues.php";
 include "EncounterPriorityLogic.php";
 include "EncounterPlayLogic.php";
+include_once __DIR__ . "/../Engine/LegalActions.php";
 
 function EncounterAI()
 {
@@ -64,7 +65,8 @@ function EncounterAI()
         else if($turn[0] == "INPUTCARDNAME")
         {
           if($AIDebug) WriteLog("AI Branch - Input Arcane");
-          ProcessInput($currentPlayer, 30, "-", 0, 0, "-", false, "Crouching Tiger");
+          $engine = new LegalActions();
+          $engine->applyAction($currentPlayer, new Action("ai_string", 30, "-", 0, 0, "-", "Crouching Tiger"));
         }
         else
         {
@@ -197,21 +199,24 @@ function EncounterAI()
       {
         if($AIDebug) WriteLog("AI Branch - Opt");
         $options = explode(",", $turn[2]);
-        ProcessInput($currentPlayer, 9, $options[0], 0, 0, "");
+        $engine = new LegalActions();
+        $engine->applyAction($currentPlayer, new Action("ai_opt_bottom", 9, $options[0], 0, 0, ""));
         CacheCombatResult();
       }
       else if($turn[0] == "LOOKHAND"  && $mainPlayer = $currentPlayer)
       {
         if($AIDebug) WriteLog("AI Branch - Opponent's Hand");
         $options = explode(",", $turn[2]);
-        ProcessInput($currentPlayer, 99, $options[0], 0, 0, "");
+        $engine = new LegalActions();
+        $engine->applyAction($currentPlayer, new Action("ai_pass", 99, "-", 0, 0, ""));
         CacheCombatResult();
       }
       else if($turn[0] == "HANDTOPBOTTOM"  && $mainPlayer = $currentPlayer)
       {
         if($AIDebug) WriteLog("AI Branch - Hand Top/Bottom");
         $options = explode(",", $turn[2]);
-        ProcessInput($currentPlayer, 12, $options[0], 0, 0, "");
+        $engine = new LegalActions();
+        $engine->applyAction($currentPlayer, new Action("ai_hand_top", 12, $options[0], 0, 0, ""));
         CacheCombatResult();
       }
       else
