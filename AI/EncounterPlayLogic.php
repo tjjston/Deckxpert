@@ -1,5 +1,7 @@
 <?php
 
+include_once __DIR__ . "/../Engine/LegalActions.php";
+
 //Every single function with the exception of the PlayCardAttempt() functions at the bottom of this file are entirely used to make sure the card/ability the AI wants to play is actually legal before it attempts anything.
 //This might be a bit to dig through, but you don't really need to understand any of this to create priority arrays.
 //If you do have questions though, just ping me, @Etasus, and I can help you out.
@@ -188,11 +190,11 @@ function BlockCardAttempt($storedPriorityNode)
   switch($storedPriorityNode[1])
   {
     case "Hand":
-      ProcessInput($currentPlayer, 27, "", $storedPriorityNode[2], 0, "");
+      ApplyAIModeAction($currentPlayer, 27, "", $storedPriorityNode[2]);
       CacheCombatResult();
       break;
     case "Character":
-      ProcessInput($currentPlayer, 3, "", $storedPriorityNode[2], 0, "");
+      ApplyAIModeAction($currentPlayer, 3, "", $storedPriorityNode[2]);
       CacheCombatResult();
       break;
     default: WriteLog("ERROR: AI attempting to block with an unblockable card. Please log a bug report."); break;
@@ -205,23 +207,23 @@ function PlayCardAttempt($storedPriorityNode)
   switch($storedPriorityNode[1])
   {
     case "Hand":
-      ProcessInput($currentPlayer, 27, "", $storedPriorityNode[2], 0, "");
+      ApplyAIModeAction($currentPlayer, 27, "", $storedPriorityNode[2]);
       CacheCombatResult();
       break;
     case "Arsenal":
-      ProcessInput($currentPlayer, 5, "", $storedPriorityNode[2], 0, "");
+      ApplyAIModeAction($currentPlayer, 5, "", $storedPriorityNode[2]);
       CacheCombatResult();
       break;
     case "Character":
-      ProcessInput($currentPlayer, 3, "", $storedPriorityNode[2], 0, "");
+      ApplyAIModeAction($currentPlayer, 3, "", $storedPriorityNode[2]);
       CacheCombatResult();
       break;
     case "Item":
-      ProcessInput($currentPlayer, 10, "", $storedPriorityNode[2], 0, "");
+      ApplyAIModeAction($currentPlayer, 10, "", $storedPriorityNode[2]);
       CacheCombatResult();
       break;
     case "Ally":
-      ProcessInput($currentPlayer, 24, "", $storedPriorityNode[2], 0, "");
+      ApplyAIModeAction($currentPlayer, 24, "", $storedPriorityNode[2]);
       CacheCombatResult();
       break;
     default: WriteLog("ERROR: AI attempting to play an unplayable card. Please log a bug report."); PassInput(); break;
@@ -234,7 +236,7 @@ function PitchCardAttempt($storedPriorityNode)
   switch($storedPriorityNode[1])
   {
     case "Hand":
-      ProcessInput($currentPlayer, 27, "", $storedPriorityNode[2], 0, "");
+      ApplyAIModeAction($currentPlayer, 27, "", $storedPriorityNode[2]);
       CacheCombatResult();
       break;
     default: WriteLog("ERROR: AI attempting to pitch an unpitchable card. Please log a bug report."); break;
@@ -247,7 +249,7 @@ function ArsenalCardAttempt($storedPriorityNode)
   switch($storedPriorityNode[1])
   {
     case "Hand":
-      ProcessInput($currentPlayer, 4, "", $storedPriorityNode[0], 0, "");
+      ApplyAIModeAction($currentPlayer, 4, "", $storedPriorityNode[0]);
       CacheCombatResult();
       break;
     default: WriteLog("ERROR: AI attempting to arsenal an unarsenalable card. Please log a bug report."); break;
@@ -263,5 +265,15 @@ function FixHand($currentPlayer)
     if($hand[$i] != "") $fix[] = $hand[$i];
   }
   $hand = $fix;
+}
+
+function ApplyAIModeAction($playerId, $mode, $buttonInput = "", $cardID = 0, $chkCount = 0, $chkInput = "", $inputText = "")
+{
+  $engine = new LegalActions();
+  $action = new Action("ai_mode_action", $mode, (string)$buttonInput, $cardID, $chkCount, $chkInput, $inputText);
+  $result = $engine->applyAction($playerId, $action);
+  if ($result instanceof Result && !$result->ok) {
+    WriteLog("AI attempted illegal action mode=$mode cardID=$cardID");
+  }
 }
 ?>

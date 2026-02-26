@@ -3,6 +3,7 @@
 include "EncounterPriorityValues.php";
 include "EncounterPriorityLogic.php";
 include "EncounterPlayLogic.php";
+include_once __DIR__ . "/../Engine/LegalActions.php";
 include_once __DIR__ . "/../Engine/Agent/Action.php";
 include_once __DIR__ . "/../Engine/Agent/Observation.php";
 include_once __DIR__ . "/../Engine/Agent/Agents/EncounterAgent.php";
@@ -86,6 +87,20 @@ function BuildEncounterLegalActions($currentPlayer, &$hand, &$character, &$arsen
             $largestIndex = $i;
             $optionIndex = $index;
           }
+          $options = explode(",", $turn[2]);
+          ContinueDecisionQueue($options[$optionIndex]);
+        }
+        else if($turn[0] == "INPUTCARDNAME")
+        {
+          if($AIDebug) WriteLog("AI Branch - Input Arcane");
+          $engine = new LegalActions();
+          $engine->applyAction($currentPlayer, new Action("ai_string", 30, "-", 0, 0, "-", "Crouching Tiger"));
+        }
+        else
+        {
+          if($AIDebug) WriteLog("AI Branch - DQ First Option");
+          $options = explode(",", $turn[2]);
+          ContinueDecisionQueue($options[0]);//Just pick the first option
           ++$index;
         }
       }
@@ -158,11 +173,20 @@ function BuildEncounterLegalActions($currentPlayer, &$hand, &$character, &$arsen
       }
       if($found == true && $storedPriorityNode[3] != 0)
       {
+        if($AIDebug) WriteLog("AI Branch - Opt");
+        $options = explode(",", $turn[2]);
+        $engine = new LegalActions();
+        $engine->applyAction($currentPlayer, new Action("ai_opt_bottom", 9, $options[0], 0, 0, ""));
         PlayCardAttempt($storedPriorityNode);
         CacheCombatResult();
       }
       else
       {
+        if($AIDebug) WriteLog("AI Branch - Opponent's Hand");
+        $options = explode(",", $turn[2]);
+        $engine = new LegalActions();
+        $engine->applyAction($currentPlayer, new Action("ai_pass", 99, "-", 0, 0, ""));
+        CacheCombatResult();
         PassInput();
       }
     }]),
@@ -177,6 +201,11 @@ function BuildEncounterLegalActions($currentPlayer, &$hand, &$character, &$arsen
       }
       if($found == true && $storedPriorityNode[3] != 0)
       {
+        if($AIDebug) WriteLog("AI Branch - Hand Top/Bottom");
+        $options = explode(",", $turn[2]);
+        $engine = new LegalActions();
+        $engine->applyAction($currentPlayer, new Action("ai_hand_top", 12, $options[0], 0, 0, ""));
+        CacheCombatResult();
         PitchCardAttempt($storedPriorityNode);
       }
       else
