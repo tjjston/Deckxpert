@@ -1,5 +1,7 @@
 <?php
 
+include_once "Engine/ObservationBuilder.php";
+
 function GetStringArray($line)
 {
   $line = trim($line);
@@ -192,7 +194,7 @@ function BuildMyGamestate($playerID)
   global $theirDeck, $theirHand, $theirResources, $theirCharacter, $theirArsenal, $theirHealth, $theirAuras, $theirPitch, $theirBanish, $theirClassState, $theirItems;
   global $theirCharacterEffects, $theirDiscard, $theirCardStats, $theirTurnStats;
   global $p1Material, $p2Material, $myMaterial, $theirMaterial;
-  global $myStateBuiltFor, $mainPlayerGamestateStillBuilt;
+  global $myStateBuiltFor, $mainPlayerGamestateStillBuilt, $observation;
   DoGamestateUpdate();
   $mainPlayerGamestateStillBuilt = 0;
   $myStateBuiltFor = $playerID;
@@ -228,6 +230,7 @@ function BuildMyGamestate($playerID)
   $theirMaterial = $playerID == 1 ? $p2Material : $p1Material;
   $theirCardStats = $playerID == 1 ? $p2CardStats : $p1CardStats;
   $theirTurnStats = $playerID == 1 ? $p2TurnStats : $p1TurnStats;
+  $observation = getObservation($playerID);
 }
 
 function BuildMainPlayerGameState()
