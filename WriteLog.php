@@ -10,6 +10,16 @@ function CreateLog($gameName, $path="./")
   fclose(fopen(LogPath($gameName, $path), "w")); 
 }
 
+function SetStructuredLogMode($enabled = true)
+{
+  $GLOBALS["structuredLogMode"] = $enabled;
+}
+
+function IsStructuredLogMode()
+{
+  return isset($GLOBALS["structuredLogMode"]) && $GLOBALS["structuredLogMode"];
+}
+
 function FmtPlayer($name, $id) {
   return "<span class='p$id-label'>$name</span>";
 }
@@ -18,7 +28,7 @@ function FmtKeyword($keyword) {
   return "<span class='keyword'>$keyword</span>";
 }
 
-function WriteLog($text, $player = 0, $highlight=false, $path="./", $error=false)
+function WriteLog($text, $player = 0, $highlight=false, $path="./", $error=false, $metadata=[])
 {
   global $gameName;
 
@@ -27,11 +37,28 @@ function WriteLog($text, $player = 0, $highlight=false, $path="./", $error=false
     return;
   }
   
-  $output = $highlight ? "<mark style='background-color: brown; color:azure;'>$text</mark>" : $text;
-  $output = $player != 0 ? FmtPlayer($output, $player) : $output;
-  $output = "<p class='log-entry'>$output</p>";
-  $output = $output . "\r\n";
-  $output = $error ? "<span style='color:red;'>$output</span>" : $output;
+  if(IsStructuredLogMode()) {
+    $turn = isset($GLOBALS["turn"]) && is_array($GLOBALS["turn"]) ? implode("|", $GLOBALS["turn"]) : "";
+    $entry = [
+      "timestamp" => gmdate("c"),
+      "turn" => $turn,
+      "action" => $metadata["action"] ?? "log",
+      "result" => $metadata["result"] ?? ($error ? "error" : "ok"),
+      "message" => strval($text),
+      "player" => $player,
+      "highlight" => $highlight,
+      "error" => $error
+    ];
+    if(isset($metadata["extra"])) $entry["extra"] = $metadata["extra"];
+    $output = json_encode($entry, JSON_UNESCAPED_SLASHES) . PHP_EOL;
+  }
+  else {
+    $output = $highlight ? "<mark style='background-color: brown; color:azure;'>$text</mark>" : $text;
+    $output = $player != 0 ? FmtPlayer($output, $player) : $output;
+    $output = "<p class='log-entry'>$output</p>";
+    $output = $output . "\r\n";
+    $output = $error ? "<span style='color:red;'>$output</span>" : $output;
+  }
   
   fwrite($handler, $output);
   fclose($handler);

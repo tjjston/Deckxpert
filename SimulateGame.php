@@ -31,6 +31,9 @@ if (!IsGameNameValid($gameName)) {
 
 $gameName = "r" . $gameName;
 
+InitializeMatchSeed($gameName);
+if (isset($_GET["logFormat"]) && $_GET["logFormat"] === "json") SetStructuredLogMode(true);
+
 $filename = "./Games/" . $gameName . "/commandfile.txt";
 $handler = fopen($filename, "r");
 $filesize = filesize($filename);
