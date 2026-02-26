@@ -219,6 +219,10 @@ if ($lastUpdate != 0 && $cacheVal <= $lastUpdate) {
   $MyCardBack = GetCardBack($playerID);
   $TheirCardBack = GetCardBack($otherPlayer);
 
+  $observation = getObservation($playerID);
+  $opponentHandCount = $observation["public"]["players"][$otherPlayer]["handCount"] ?? count($theirHand);
+  $opponentDeckCount = $observation["public"]["players"][$otherPlayer]["deckCount"] ?? count($theirDeck);
+
   //$response->MyPlaymat = (IsColorblindMode($playerID) ? 0 : GetPlaymat($playerID));
   //$response->TheirPlaymat = (IsColorblindMode($playerID) ? 0 : GetPlaymat($otherPlayer));
 
@@ -304,7 +308,7 @@ if ($lastUpdate != 0 && $cacheVal <= $lastUpdate) {
 
   //Opponent Hand
   $handContents = array();
-  for ($i = 0; $i < count($theirHand); ++$i) {
+  for ($i = 0; $i < $opponentHandCount; ++$i) {
     $handContents[] = JSONRenderedCard(cardNumber: $TheirCardBack, controller: ($playerID == 1 ? 2 : 1));
   }
   $response->opponentHand = $handContents;
@@ -328,8 +332,8 @@ if ($lastUpdate != 0 && $cacheVal <= $lastUpdate) {
   }
   $response->opponentPitch = $opponentPitchArr;
 
-  $response->opponentDeckCount = count($theirDeck);
-  $response->opponentDeckCard = JSONRenderedCard(count($theirDeck) > 0 ? $TheirCardBack : $blankZone);
+  $response->opponentDeckCount = $opponentDeckCount;
+  $response->opponentDeckCard = JSONRenderedCard($opponentDeckCount > 0 ? $TheirCardBack : $blankZone);
 
   $opponentBanishArr = array();
   for ($i = 0; $i < count($theirBanish); $i += BanishPieces()) {
@@ -1069,6 +1073,8 @@ if ($lastUpdate != 0 && $cacheVal <= $lastUpdate) {
   $playerInputPopup->buttons = $playerInputButtons;
   $response->playerInputPopUp = $playerInputPopup;
   $response->canPassPhase = (CanPassPhase($turn[0]) && $currentPlayer == $playerID) || (IsReplay() && $playerID == 3);
+  $response->observation = $observation;
+  AssertObservationPayloadHasNoHiddenZones($response->observation);
   // encode and send it out
   echo json_encode($response);
   exit;
