@@ -172,7 +172,7 @@ function EncounterAI()
           PassInput();
         }
       }
-      else if($turn[0] == "ARS" && $mainPlayer = $currentPlayer)//choose a card to arsenal
+      else if($turn[0] == "ARS" && $mainPlayer == $currentPlayer)//choose a card to arsenal
       {
         if($AIDebug) WriteLog("AI Branch - Choose Arsenal");
         $priortyArray = GeneratePriorityValues($hand, $character, $arsenal, $items, $allies, "ToArsenal");
@@ -193,21 +193,21 @@ function EncounterAI()
           PassInput();
         }
       }
-      else if($turn[0] == "OPT" && $mainPlayer = $currentPlayer)
+      else if($turn[0] == "OPT" && $mainPlayer == $currentPlayer)
       {
         if($AIDebug) WriteLog("AI Branch - Opt");
         $options = explode(",", $turn[2]);
         ProcessInput($currentPlayer, 9, $options[0], 0, 0, "");
         CacheCombatResult();
       }
-      else if($turn[0] == "LOOKHAND"  && $mainPlayer = $currentPlayer)
+      else if($turn[0] == "LOOKHAND"  && $mainPlayer == $currentPlayer)
       {
         if($AIDebug) WriteLog("AI Branch - Opponent's Hand");
         $options = explode(",", $turn[2]);
         ProcessInput($currentPlayer, 99, $options[0], 0, 0, "");
         CacheCombatResult();
       }
-      else if($turn[0] == "HANDTOPBOTTOM"  && $mainPlayer = $currentPlayer)
+      else if($turn[0] == "HANDTOPBOTTOM"  && $mainPlayer == $currentPlayer)
       {
         if($AIDebug) WriteLog("AI Branch - Hand Top/Bottom");
         $options = explode(",", $turn[2]);
