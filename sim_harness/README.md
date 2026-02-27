@@ -55,6 +55,7 @@ The UI supports:
 - creating simulations with seed/workers/opponent-set settings,
 - reviewing simulation history and analysis (overall, by-tier, best/worst matchup, per-opponent stats).
 - running a single match and following turn-by-turn events (action legality, card/cost/type, and per-step effects).
+- selecting single-match action policy: `random_non_pass` (default), `random_legal`, or `first_non_pass`.
 
 ### Storage
 
@@ -93,5 +94,5 @@ Core interfaces exposed by the headless engine:
 `sim_harness/php_match_runner.php` now emits per-action events with:
 - player, round, phase, chosen action, legality result
 - card metadata (`id`, `cost`, `type`)
-- phase snapshots at begin/end including resources, hand/deck/discard, land arena, and space arena
-- derived per-player effect deltas between phase begin/end
+- phase snapshots at begin/end including resources, base health, hand/deck/discard, land arena, and space arena
+- derived per-player effect deltas between phase begin/end (including base health and spent/available resources)

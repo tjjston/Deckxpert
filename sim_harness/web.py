@@ -46,6 +46,7 @@ table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid #334155;
 <div class=\"card\"><h3>Follow One Match (Turn-by-turn legality)</h3>
 <label>Player A deck</label><select id=\"deckA\"></select>
 <label>Player B deck</label><select id=\"deckB\"></select>
+<label>Policy</label><select id=\"matchPolicy\"><option value=\"random_non_pass\">Random legal (prefer non-pass)</option><option value=\"random_legal\">Random legal (uniform)</option><option value=\"first_non_pass\">First non-pass (legacy)</option></select>
 <label>Seed</label><input id=\"matchSeed\" type=\"number\" value=\"123\"/>
 <label>Max actions</label><input id=\"matchMaxActions\" type=\"number\" value=\"50\"/>
 <button onclick=\"runSingleMatch()\">Run Match</button><div id=\"matchMsg\" class=\"muted\"></div></div>
@@ -72,7 +73,7 @@ async function uploadDeck(){const msg=document.getElementById('uploadMsg');msg.t
 async function createSimulation(){const msg=document.getElementById('simMsg');msg.textContent='Running...';try{const out=await api('/api/simulations',{method:'POST',body:JSON.stringify({candidate:document.getElementById('candidate').value,opponents:document.getElementById('opponents').value,games:parseInt(document.getElementById('games').value||'20',10),seed:parseInt(document.getElementById('seed').value||'42',10),workers:parseInt(document.getElementById('workers').value||'4',10),php_script:document.getElementById('phpScript').value||null,sim_id:document.getElementById('simId').value||null})});msg.textContent='Created '+out.sim_id;await refreshAll();await showSim(out.sim_id);}catch(e){msg.textContent='Error: '+e.message;}}
 async function showDeck(id){const d=await api('/api/decks/'+encodeURIComponent(id));document.getElementById('deckView').textContent=JSON.stringify(d.swudb,null,2);}
 async function showSim(id){const d=await api('/api/simulations/'+encodeURIComponent(id)+'/analysis');document.getElementById('analysis').textContent=d.text;}
-async function runSingleMatch(){const msg=document.getElementById('matchMsg');msg.textContent='Running match...';try{const d=await api('/api/match/run',{method:'POST',body:JSON.stringify({deck_a_id:document.getElementById('deckA').value,deck_b_id:document.getElementById('deckB').value,seed:parseInt(document.getElementById('matchSeed').value||'123',10),max_actions:parseInt(document.getElementById('matchMaxActions').value||'50',10)})});msg.textContent='Done';document.getElementById('matchSummary').textContent=JSON.stringify(d.summary,null,2);const tb=document.getElementById('matchTbody');tb.innerHTML='';(d.events||[]).forEach(e=>{const tr=document.createElement('tr');const ok=e.apply_ok?'<span class="ok">ok</span>':'<span class="bad">illegal</span>';const eff=e.effects?.['player_'+e.player]||{};tr.innerHTML=`<td>${e.step}</td><td>${e.round}</td><td>${e.phase}</td><td>${e.player}</td><td>${e.action?.type||''}</td><td>${e.card?.id||''} (c:${e.card?.cost??''}, t:${e.card?.type||''})</td><td>${ok}</td><td>resΔ:${eff.resources_available_delta??''}, handΔ:${eff.hand_count_delta??''}, deckΔ:${eff.deck_count_delta??''}, discardΔ:${eff.discard_count_delta??''}</td>`;tb.appendChild(tr);});}catch(e){msg.textContent='Error: '+e.message;}}
+async function runSingleMatch(){const msg=document.getElementById('matchMsg');msg.textContent='Running match...';try{const d=await api('/api/match/run',{method:'POST',body:JSON.stringify({deck_a_id:document.getElementById('deckA').value,deck_b_id:document.getElementById('deckB').value,policy:document.getElementById('matchPolicy').value,seed:parseInt(document.getElementById('matchSeed').value||'123',10),max_actions:parseInt(document.getElementById('matchMaxActions').value||'50',10)})});msg.textContent='Done';document.getElementById('matchSummary').textContent=JSON.stringify(d.summary,null,2);const tb=document.getElementById('matchTbody');tb.innerHTML='';(d.events||[]).forEach(e=>{const tr=document.createElement('tr');const ok=e.apply_ok?'<span class="ok">ok</span>':'<span class="bad">illegal</span>';const eff=e.effects?.['player_'+e.player]||{};tr.innerHTML=`<td>${e.step}</td><td>${e.round}</td><td>${e.phase}</td><td>${e.player}</td><td>${e.action?.type||''}</td><td>${e.card?.id||''} (c:${e.card?.cost??''}, t:${e.card?.type||''})</td><td>${ok}</td><td>hpΔ:${eff.base_health_delta??''}, resΔ:${eff.resources_available_delta??''}, spentΔ:${eff.resources_spent_delta??''}, handΔ:${eff.hand_count_delta??''}, deckΔ:${eff.deck_count_delta??''}, discardΔ:${eff.discard_count_delta??''}, landΔ:${eff.land_arena_count_delta??''}, spaceΔ:${eff.space_arena_count_delta??''}</td>`;tb.appendChild(tr);});}catch(e){msg.textContent='Error: '+e.message;}}
 refreshAll();
 </script></body></html>
 """
@@ -115,7 +116,13 @@ def _deck_to_runner_string(swudb: dict[str, Any]) -> str:
     return " ".join(material) + "\n" + " ".join(main)
 
 
-def _run_single_match(deck_a: cli.DeckRecord, deck_b: cli.DeckRecord, seed: int, max_actions: int) -> dict[str, Any]:
+def _run_single_match(
+    deck_a: cli.DeckRecord,
+    deck_b: cli.DeckRecord,
+    seed: int,
+    max_actions: int,
+    policy: str,
+) -> dict[str, Any]:
     cmd = [
         "php",
         "sim_harness/php_match_runner.php",
@@ -129,6 +136,8 @@ def _run_single_match(deck_a: cli.DeckRecord, deck_b: cli.DeckRecord, seed: int,
         str(uuid.uuid4().int % 1_000_000),
         "--max-actions",
         str(max_actions),
+        "--policy",
+        policy,
     ]
     proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
     return json.loads(proc.stdout)
@@ -240,13 +249,17 @@ class SimWebHandler(BaseHTTPRequestHandler):
                 deck_b = cli._find_deck(decks, str(payload.get("deck_b_id", "")))
                 seed = int(payload.get("seed", 123))
                 max_actions = max(1, int(payload.get("max_actions", 50)))
-                match = _run_single_match(deck_a, deck_b, seed, max_actions)
+                policy = str(payload.get("policy", "random_non_pass"))
+                if policy not in {"random_non_pass", "random_legal", "first_non_pass"}:
+                    raise ValueError("policy must be random_non_pass/random_legal/first_non_pass")
+                match = _run_single_match(deck_a, deck_b, seed, max_actions, policy)
                 self._send_json({
                     "ok": True,
                     "summary": {
                         "match_id": match.get("match_id"),
                         "winner": match.get("winner"),
                         "turns": match.get("turns"),
+                        "policy": match.get("stats", {}).get("policy"),
                         "events": match.get("stats", {}).get("events", 0),
                         "illegal_actions": match.get("stats", {}).get("illegal_actions", 0),
                         "game_over": match.get("stats", {}).get("game_over", False),
