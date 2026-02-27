@@ -8,13 +8,17 @@ ini_set('display_startup_errors', '0');
 
 require_once __DIR__ . '/../Engine/HeadlessEngine.php';
 
-$options = getopt('', ['seed:', 'deck-a:', 'deck-b:', 'match-id:', 'log-format::', 'max-actions::']);
+$options = getopt('', ['seed:', 'deck-a:', 'deck-b:', 'match-id:', 'log-format::', 'max-actions:', 'policy::']);
 $seed = intval($options['seed'] ?? 0);
 $deckAInput = $options['deck-a'] ?? 'deck_a';
 $deckBInput = $options['deck-b'] ?? 'deck_b';
 $matchID = intval($options['match-id'] ?? 0);
 $logFormat = $options['log-format'] ?? 'json';
-$maxActions = array_key_exists('max-actions', $options) ? max(1, intval($options['max-actions'])) : null;
+$maxActions = max(1, intval($options['max-actions'] ?? 500));
+$policy = strtolower(trim(strval($options['policy'] ?? 'random_non_pass')));
+if (!in_array($policy, ['random_non_pass', 'random_legal', 'first_non_pass'], true)) {
+  $policy = 'random_non_pass';
+}
 
 $deckA = normalizeDecklistForHeadless($deckAInput);
 $deckB = normalizeDecklistForHeadless($deckBInput);
@@ -29,13 +33,54 @@ if ($logFormat === 'json') SetStructuredLogMode(true);
 initHeadlessGame($deckA, $deckB, $seed);
 $GLOBALS['gameName'] = $gameName;
 
-function chooseAction(array $legalActions): ?array
+function deterministicChoiceIndex(array $actions, int $seed, int $step, int $playerId, int $round, string $phase): int
+{
+  $entropy = implode('|', [
+    strval($seed),
+    strval($step),
+    strval($playerId),
+    strval($round),
+    $phase,
+    strval(count($actions)),
+  ]);
+  $hash = hash('sha256', $entropy);
+  $sample = intval(hexdec(substr($hash, 0, 8)));
+  return $sample % max(1, count($actions));
+}
+
+function chooseAction(array $legalActions, int $seed, int $step, int $playerId, int $round, string $phase, string $policy): ?array
 {
   if (count($legalActions) === 0) return null;
-  foreach ($legalActions as $action) {
-    if (($action['type'] ?? '') !== 'pass') return $action;
+
+  if ($policy === 'first_non_pass') {
+    foreach ($legalActions as $action) {
+      if (($action['type'] ?? '') !== 'pass') return $action;
+    }
+    return $legalActions[0];
   }
-  return $legalActions[0];
+
+  $candidates = $legalActions;
+  if ($policy === 'random_non_pass') {
+    $nonPass = array_values(array_filter(
+      $legalActions,
+      static fn(array $action): bool => strval($action['type'] ?? '') !== 'pass'
+    ));
+    if (count($nonPass) > 0) $candidates = $nonPass;
+  }
+
+  $choiceIndex = deterministicChoiceIndex($candidates, $seed, $step, $playerId, $round, $phase);
+  return $candidates[$choiceIndex] ?? $candidates[0];
+}
+
+function legalActionTypeSummary(array $legalActions): array
+{
+  $summary = [];
+  foreach ($legalActions as $action) {
+    $type = strval($action['type'] ?? 'unknown');
+    $summary[$type] = intval($summary[$type] ?? 0) + 1;
+  }
+  ksort($summary);
+  return $summary;
 }
 
 function resolveCardReference(int $playerId, array $action): string
@@ -85,6 +130,7 @@ function allyArenaCardIds(int $playerId): array
 
 function playerPhaseSnapshot(int $playerId): array
 {
+  global $playerHealths;
   $hand = &GetHand($playerId);
   $deck = &GetDeck($playerId);
   $discard = &GetDiscard($playerId);
@@ -96,6 +142,9 @@ function playerPhaseSnapshot(int $playerId): array
       'raw' => $resources,
       'available' => intval($resources[0] ?? 0),
       'spent' => intval($resources[1] ?? 0),
+    ],
+    'base' => [
+      'health' => intval($playerHealths[$playerId - 1] ?? 0),
     ],
     'zones' => [
       'hand' => $hand,
@@ -128,6 +177,8 @@ function deriveEffects(array $before, array $after): array
     $a = $after[$playerKey];
     $effects[$playerKey] = [
       'resources_available_delta' => numericDelta(intval($b['resources']['available']), intval($a['resources']['available'])),
+      'resources_spent_delta' => numericDelta(intval($b['resources']['spent']), intval($a['resources']['spent'])),
+      'base_health_delta' => numericDelta(intval($b['base']['health']), intval($a['base']['health'])),
       'hand_count_delta' => numericDelta(count($b['zones']['hand']), count($a['zones']['hand'])),
       'deck_count_delta' => numericDelta(count($b['zones']['deck']), count($a['zones']['deck'])),
       'discard_count_delta' => numericDelta(count($b['zones']['discard']), count($a['zones']['discard'])),
@@ -141,7 +192,7 @@ function deriveEffects(array $before, array $after): array
 $events = [];
 $illegalActions = 0;
 
-for ($step = 1; !IsGameOver() && ($maxActions === null || $step <= $maxActions); ++$step) {
+for ($step = 1; $step <= $maxActions && !IsGameOver(); ++$step) {
   $playerId = intval($GLOBALS['currentPlayer'] ?? 1);
   $turnSnapshot = $GLOBALS['turn'] ?? ['-', '0'];
   $phase = strval($turnSnapshot[0] ?? '-');
@@ -149,7 +200,7 @@ for ($step = 1; !IsGameOver() && ($maxActions === null || $step <= $maxActions);
 
   $phaseBegin = phaseSnapshot();
   $legalActions = getLegalActions($playerId);
-  $chosen = chooseAction($legalActions);
+  $chosen = chooseAction($legalActions, $seed, $step, $playerId, $round, $phase, $policy);
   if ($chosen === null) break;
 
   $cardRef = resolveCardReference($playerId, $chosen);
@@ -175,6 +226,7 @@ for ($step = 1; !IsGameOver() && ($maxActions === null || $step <= $maxActions);
       'type' => $cardType,
     ],
     'legal_action_count' => count($legalActions),
+    'legal_actions_by_type' => legalActionTypeSummary($legalActions),
     'apply_ok' => $ok,
     'message' => strval($result['message'] ?? ''),
     'next_player' => intval($GLOBALS['currentPlayer'] ?? $playerId),
@@ -194,6 +246,7 @@ for ($step = 1; !IsGameOver() && ($maxActions === null || $step <= $maxActions);
     'card' => $cardRef,
     'round' => $round,
     'phase' => $phase,
+    'policy' => $policy,
     'extra' => [
       'card_cost' => $cardCost,
       'card_type' => $cardType,
@@ -217,6 +270,7 @@ $response = [
     'events' => count($events),
     'illegal_actions' => $illegalActions,
     'game_over' => IsGameOver(),
+    'policy' => $policy,
   ],
   'events' => $events,
 ];

@@ -1,0 +1,248 @@
+[
+  {
+    "deck_id": "maul",
+    "pool": "candidate",
+    "swudb": {
+      "metadata": {
+        "name": "Maul Blue V.1 - Post Rotation MoG TCG",
+        "author": "MoGTCG"
+      },
+      "leader": {
+        "id": "LOF_009",
+        "count": 1
+      },
+      "base": {
+        "id": "LOF_020",
+        "count": 1
+      },
+      "deck": [
+        {
+          "id": "SEC_039",
+          "count": 2
+        },
+        {
+          "id": "SEC_040",
+          "count": 2
+        },
+        {
+          "id": "LOF_231",
+          "count": 3
+        },
+        {
+          "id": "LOF_070",
+          "count": 3
+        },
+        {
+          "id": "LOF_061",
+          "count": 3
+        },
+        {
+          "id": "LOF_160",
+          "count": 3
+        },
+        {
+          "id": "LOF_079",
+          "count": 3
+        },
+        {
+          "id": "JTL_143",
+          "count": 2
+        },
+        {
+          "id": "JTL_144",
+          "count": 3
+        },
+        {
+          "id": "LOF_132",
+          "count": 3
+        },
+        {
+          "id": "LOF_237",
+          "count": 2
+        },
+        {
+          "id": "SEC_038",
+          "count": 3
+        },
+        {
+          "id": "LOF_067",
+          "count": 3
+        },
+        {
+          "id": "LOF_129",
+          "count": 3
+        },
+        {
+          "id": "SEC_183",
+          "count": 1
+        },
+        {
+          "id": "LOF_031",
+          "count": 3
+        },
+        {
+          "id": "SEC_028",
+          "count": 3
+        },
+        {
+          "id": "LOF_035",
+          "count": 3
+        },
+        {
+          "id": "LOF_041",
+          "count": 2
+        }
+      ],
+      "sideboard": [
+        {
+          "id": "SEC_075",
+          "count": 1
+        },
+        {
+          "id": "SEC_037",
+          "count": 1
+        },
+        {
+          "id": "JTL_143",
+          "count": 1
+        },
+        {
+          "id": "LOF_140",
+          "count": 1
+        },
+        {
+          "id": "LAW_117",
+          "count": 1
+        },
+        {
+          "id": "SEC_078",
+          "count": 1
+        },
+        {
+          "id": "SEC_180",
+          "count": 1
+        },
+        {
+          "id": "JTL_043",
+          "count": 1
+        },
+        {
+          "id": "LAW_132",
+          "count": 1
+        }
+      ]
+    },
+    "added_at": "2026-02-27T05:05:54.073311+00:00"
+  },
+  {
+    "deck_id": "sebulba",
+    "pool": "candidate",
+    "swudb": {
+      "metadata": {
+        "name": "Crazy fast Sebulba",
+        "author": "_gn0m"
+      },
+      "leader": {
+        "id": "LAW_012",
+        "count": 1
+      },
+      "base": {
+        "id": "SOR_030",
+        "count": 1
+      },
+      "deck": [
+        {
+          "id": "JTL_210",
+          "count": 3
+        },
+        {
+          "id": "SEC_233",
+          "count": 2
+        },
+        {
+          "id": "LOF_182",
+          "count": 3
+        },
+        {
+          "id": "LAW_211",
+          "count": 3
+        },
+        {
+          "id": "LAW_075",
+          "count": 3
+        },
+        {
+          "id": "SEC_176",
+          "count": 3
+        },
+        {
+          "id": "LAW_174",
+          "count": 3
+        },
+        {
+          "id": "LAW_173",
+          "count": 3
+        },
+        {
+          "id": "LOF_186",
+          "count": 3
+        },
+        {
+          "id": "LAW_082",
+          "count": 3
+        },
+        {
+          "id": "LAW_206",
+          "count": 3
+        },
+        {
+          "id": "LOF_131",
+          "count": 3
+        },
+        {
+          "id": "JTL_211",
+          "count": 2
+        },
+        {
+          "id": "LOF_179",
+          "count": 3
+        },
+        {
+          "id": "SEC_171",
+          "count": 3
+        },
+        {
+          "id": "LAW_076",
+          "count": 3
+        },
+        {
+          "id": "LAW_176",
+          "count": 3
+        },
+        {
+          "id": "LAW_077",
+          "count": 1
+        }
+      ],
+      "sideboard": [
+        {
+          "id": "LAW_085",
+          "count": 2
+        },
+        {
+          "id": "LAW_083",
+          "count": 2
+        },
+        {
+          "id": "LAW_172",
+          "count": 3
+        },
+        {
+          "id": "SEC_163",
+          "count": 3
+        }
+      ]
+    },
+    "added_at": "2026-02-27T05:06:25.185863+00:00"
+  }
+]
