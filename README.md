@@ -27,6 +27,8 @@ bash petranaki.sh restart
 
 Open this address in your browser: http://localhost:8080/Arena/MainMenu.php
 
+The simulation dashboard is also available after startup at: http://localhost:8765
+
 If you want to play a game against yourself, open multiple windows / tabs and connect.
 
 #### Step 3. Run debugger in VSCode (optional)
