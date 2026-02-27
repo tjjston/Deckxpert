@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Deckxpert Sim Harness</title>
+  <style>
+    body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:24px}
+    .card{max-width:900px;margin:0 auto;background:#111827;border:1px solid #334155;border-radius:10px;padding:18px}
+    code,pre{background:#020617;border:1px solid #334155;border-radius:6px;padding:2px 6px}
+    a{color:#93c5fd}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Deckxpert Simulation UI</h2>
+    <p>
+      If you reached this page from <code>http://localhost:8080/sim_harness/</code>, Apache is serving static files,
+      but the interactive simulation dashboard runs as a Python web app.
+    </p>
+    <p><strong>Start dashboard:</strong></p>
+    <pre>python -m sim_harness.web --host 127.0.0.1 --port 8765</pre>
+    <p>Then open: <a href="http://127.0.0.1:8765">http://127.0.0.1:8765</a>.</p>
+    <p>
+      This avoids Apache 403/Forbidden on directory routes and gives full deck upload,
+      simulation run, and turn-by-turn legality inspection.
+    </p>
+  </div>
+</body>
+</html>
