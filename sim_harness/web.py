@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import shutil
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -117,14 +116,8 @@ def _deck_to_runner_string(swudb: dict[str, Any]) -> str:
 
 
 def _run_single_match(deck_a: cli.DeckRecord, deck_b: cli.DeckRecord, seed: int, max_actions: int) -> dict[str, Any]:
-    php_bin = shutil.which("php")
-    if php_bin is None:
-        raise ValueError(
-            "PHP CLI binary was not found on PATH. Install PHP CLI or add it to PATH, then retry."
-        )
-
     cmd = [
-        php_bin,
+        "php",
         "sim_harness/php_match_runner.php",
         "--seed",
         str(seed),
@@ -137,12 +130,7 @@ def _run_single_match(deck_a: cli.DeckRecord, deck_b: cli.DeckRecord, seed: int,
         "--max-actions",
         str(max_actions),
     ]
-    try:
-        proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        raise ValueError(f"PHP runner failed: {stderr or 'unknown error'}") from exc
-
+    proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
     return json.loads(proc.stdout)
 
 
@@ -190,7 +178,6 @@ class SimWebHandler(BaseHTTPRequestHandler):
                         "decks_file": str(cli.DECKS_FILE),
                         "sims_file": str(cli.SIMS_FILE),
                         "cwd": str(Path.cwd()),
-                        "php_bin": shutil.which("php") or "not_found",
                     },
                 })
                 return
