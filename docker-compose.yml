@@ -30,6 +30,19 @@ services:
       STAGE: "${STAGE:-prod}"
     user: "${DOCKER_USER}"
 
+  sim-harness-web:
+    image: python:3.11-slim
+    restart: always
+    working_dir: /workspace
+    volumes:
+      - "./:/workspace:Z"
+    command: >
+      bash -lc "apt-get update && apt-get install -y --no-install-recommends php-cli && rm -rf /var/lib/apt/lists/* && python -m sim_harness.web --host 0.0.0.0 --port 8765"
+    ports:
+      - "8765:8765"
+    depends_on:
+      - web-server
+
   mysql-server:
     image: mysql:latest
     restart: always
