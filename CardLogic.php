@@ -1706,7 +1706,9 @@ function IndirectDamage($cardID, $sourcePlayer, $amount, $fromUnitEffect=false, 
 }
 
 function CardCostIsOdd($cardID) {
-  return CardCost($cardID) % 2 == 1;
+  $cost = CardCost($cardID);
+  if (!is_numeric($cost)) return false;
+  return (intval($cost) % 2) == 1;
 }
 
 function PlayerIsUsingNabatVillage($player) {

@@ -15,8 +15,12 @@ class Ally {
 
     if ($mzArr[0] != "MYALLY" && $mzArr[0] != "THEIRALLY") {
       $mzArr = ["MYALLY", ""]; // Default non-existent ally
-      $initialPlayer = ($player == 1 || $player == 2) ? $player : $currentPlayer;
-      $players = [$initialPlayer, ($initialPlayer % 2) + 1];
+      $initialPlayerRaw = ($player == 1 || $player == 2 || $player == "1" || $player == "2") ? $player : $currentPlayer;
+      $initialPlayer = intval($initialPlayerRaw);
+      if ($initialPlayer !== 1 && $initialPlayer !== 2) {
+        $initialPlayer = 1;
+      }
+      $players = [$initialPlayer, $initialPlayer === 1 ? 2 : 1];
       foreach ($players as $p) {
         $index = SearchAlliesForUniqueID($MZIndexOrUniqueID, $p);
         if ($index > -1) {

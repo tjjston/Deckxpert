@@ -244,5 +244,651 @@
       ]
     },
     "added_at": "2026-02-27T05:06:25.185863+00:00"
+  },
+  {
+    "deck_id": "e62149f52d9f",
+    "pool": "candidate",
+    "swudb": {
+      "metadata": {
+        "name": "[Rotation] Grand Admiral Thrawn Aggression",
+        "author": "ScrubGamesSWU"
+      },
+      "leader": {
+        "id": "JTL_002",
+        "count": 1
+      },
+      "base": {
+        "id": "SEC_023",
+        "count": 1
+      },
+      "deck": [
+        {
+          "id": "LOF_160",
+          "count": 3
+        },
+        {
+          "id": "LOF_059",
+          "count": 3
+        },
+        {
+          "id": "JTL_043",
+          "count": 3
+        },
+        {
+          "id": "JTL_132",
+          "count": 3
+        },
+        {
+          "id": "JTL_039",
+          "count": 3
+        },
+        {
+          "id": "JTL_032",
+          "count": 3
+        },
+        {
+          "id": "JTL_242",
+          "count": 2
+        },
+        {
+          "id": "JTL_143",
+          "count": 2
+        },
+        {
+          "id": "LOF_070",
+          "count": 3
+        },
+        {
+          "id": "LAW_044",
+          "count": 2
+        },
+        {
+          "id": "LOF_148",
+          "count": 3
+        },
+        {
+          "id": "SEC_132",
+          "count": 3
+        },
+        {
+          "id": "JTL_162",
+          "count": 3
+        },
+        {
+          "id": "IBH_082",
+          "count": 3
+        },
+        {
+          "id": "LOF_057",
+          "count": 3
+        },
+        {
+          "id": "JTL_181",
+          "count": 2
+        },
+        {
+          "id": "SEC_038",
+          "count": 3
+        },
+        {
+          "id": "JTL_033",
+          "count": 3
+        }
+      ],
+      "sideboard": [
+        {
+          "id": "JTL_041",
+          "count": 2
+        },
+        {
+          "id": "JTL_143",
+          "count": 1
+        },
+        {
+          "id": "LAW_044",
+          "count": 1
+        },
+        {
+          "id": "JTL_181",
+          "count": 1
+        },
+        {
+          "id": "JTL_164",
+          "count": 3
+        }
+      ]
+    },
+    "added_at": "2026-02-27T22:22:31.920806+00:00"
+  },
+  {
+    "deck_id": "68c936fed4d3",
+    "pool": "candidate",
+    "swudb": {
+      "metadata": {
+        "name": "AsakaFaB_SWU5(SAGE)",
+        "author": "hana"
+      },
+      "leader": {
+        "id": "JTL_012",
+        "count": 1
+      },
+      "base": {
+        "id": "SOR_023",
+        "count": 1
+      },
+      "deck": [
+        {
+          "id": "SEC_152",
+          "count": 2
+        },
+        {
+          "id": "JTL_149",
+          "count": 3
+        },
+        {
+          "id": "JTL_102",
+          "count": 3
+        },
+        {
+          "id": "JTL_096",
+          "count": 3
+        },
+        {
+          "id": "JTL_125",
+          "count": 3
+        },
+        {
+          "id": "JTL_177",
+          "count": 3
+        },
+        {
+          "id": "JTL_151",
+          "count": 3
+        },
+        {
+          "id": "JTL_103",
+          "count": 3
+        },
+        {
+          "id": "TWI_174",
+          "count": 3
+        },
+        {
+          "id": "SEC_180",
+          "count": 2
+        },
+        {
+          "id": "TWI_142",
+          "count": 2
+        },
+        {
+          "id": "JTL_100",
+          "count": 2
+        },
+        {
+          "id": "JTL_158",
+          "count": 2
+        },
+        {
+          "id": "LOF_100",
+          "count": 1
+        },
+        {
+          "id": "SOR_162",
+          "count": 2
+        },
+        {
+          "id": "SEC_172",
+          "count": 3
+        },
+        {
+          "id": "SHD_246",
+          "count": 2
+        },
+        {
+          "id": "SOR_141",
+          "count": 3
+        },
+        {
+          "id": "JTL_114",
+          "count": 2
+        },
+        {
+          "id": "SHD_101",
+          "count": 3
+        }
+      ],
+      "sideboard": [
+        {
+          "id": "LOF_144",
+          "count": 2
+        },
+        {
+          "id": "JTL_121",
+          "count": 1
+        },
+        {
+          "id": "SEC_117",
+          "count": 3
+        },
+        {
+          "id": "SEC_180",
+          "count": 1
+        },
+        {
+          "id": "TWI_170",
+          "count": 2
+        },
+        {
+          "id": "SOR_162",
+          "count": 1
+        }
+      ]
+    },
+    "added_at": "2026-02-27T23:53:16.368025+00:00"
+  },
+  {
+    "deck_id": "mechanics_probe",
+    "pool": "candidate",
+    "swudb": {
+      "metadata": {
+        "name": "Mechanics Probe (Keywords + Force + Leader)",
+        "author": "codex"
+      },
+      "leader": {
+        "id": "LOF_009",
+        "count": 1
+      },
+      "base": {
+        "id": "LOF_020",
+        "count": 1
+      },
+      "deck": [
+        {
+          "id": "SHD_029",
+          "count": 3
+        },
+        {
+          "id": "LOF_196",
+          "count": 3
+        },
+        {
+          "id": "TWI_214",
+          "count": 3
+        },
+        {
+          "id": "JTL_087",
+          "count": 3
+        },
+        {
+          "id": "LOF_061",
+          "count": 3
+        },
+        {
+          "id": "SEC_028",
+          "count": 3
+        },
+        {
+          "id": "LOF_160",
+          "count": 3
+        },
+        {
+          "id": "LOF_035",
+          "count": 1
+        },
+        {
+          "id": "LOF_132",
+          "count": 2
+        },
+        {
+          "id": "LOF_237",
+          "count": 2
+        },
+        {
+          "id": "JTL_143",
+          "count": 2
+        },
+        {
+          "id": "SEC_039",
+          "count": 3
+        },
+        {
+          "id": "SEC_040",
+          "count": 2
+        },
+        {
+          "id": "LOF_079",
+          "count": 3
+        },
+        {
+          "id": "JTL_130",
+          "count": 2
+        },
+        {
+          "id": "JTL_229",
+          "count": 2
+        },
+        {
+          "id": "LOF_223",
+          "count": 3
+        },
+        {
+          "id": "LOF_031",
+          "count": 3
+        },
+        {
+          "id": "LOF_129",
+          "count": 2
+        },
+        {
+          "id": "LOF_067",
+          "count": 1
+        },
+        {
+          "id": "SEC_038",
+          "count": 1
+        }
+      ],
+      "sideboard": []
+    },
+    "added_at": "2026-02-28T00:00:00+00:00"
+  },
+  {
+    "deck_id": "a9e871bf8163",
+    "pool": "starter",
+    "swudb": {
+      "metadata": {
+        "name": "Luke Starter, Improved with C/U",
+        "author": "deployyourleadergaming"
+      },
+      "leader": {
+        "id": "SOR_005",
+        "count": 1
+      },
+      "base": {
+        "id": "SOR_029",
+        "count": 1
+      },
+      "deck": [
+        {
+          "id": "SOR_198",
+          "count": 1
+        },
+        {
+          "id": "SOR_195",
+          "count": 2
+        },
+        {
+          "id": "SOR_189",
+          "count": 3
+        },
+        {
+          "id": "SOR_044",
+          "count": 3
+        },
+        {
+          "id": "TWI_226",
+          "count": 3
+        },
+        {
+          "id": "SOR_047",
+          "count": 3
+        },
+        {
+          "id": "SOR_220",
+          "count": 3
+        },
+        {
+          "id": "SOR_049",
+          "count": 1
+        },
+        {
+          "id": "SOR_048",
+          "count": 2
+        },
+        {
+          "id": "SOR_238",
+          "count": 2
+        },
+        {
+          "id": "SOR_237",
+          "count": 3
+        },
+        {
+          "id": "SOR_241",
+          "count": 3
+        },
+        {
+          "id": "SOR_192",
+          "count": 3
+        },
+        {
+          "id": "SOR_053",
+          "count": 2
+        },
+        {
+          "id": "SOR_236",
+          "count": 3
+        },
+        {
+          "id": "SOR_055",
+          "count": 2
+        },
+        {
+          "id": "SOR_077",
+          "count": 3
+        },
+        {
+          "id": "SOR_045",
+          "count": 3
+        },
+        {
+          "id": "SHD_070",
+          "count": 2
+        },
+        {
+          "id": "SOR_240",
+          "count": 3
+        }
+      ],
+      "sideboard": []
+    },
+    "added_at": "2026-02-28T13:04:08.480682+00:00"
+  },
+  {
+    "deck_id": "975c4ccb3e4f",
+    "pool": "starter",
+    "swudb": {
+      "metadata": {
+        "name": "Vader Starter, Improved with C/U",
+        "author": "deployyourleadergaming"
+      },
+      "leader": {
+        "id": "SOR_010",
+        "count": 1
+      },
+      "base": {
+        "id": "SOR_023",
+        "count": 1
+      },
+      "deck": [
+        {
+          "id": "SOR_128",
+          "count": 3
+        },
+        {
+          "id": "SOR_134",
+          "count": 3
+        },
+        {
+          "id": "SOR_126",
+          "count": 3
+        },
+        {
+          "id": "SOR_135",
+          "count": 2
+        },
+        {
+          "id": "TWI_174",
+          "count": 3
+        },
+        {
+          "id": "SHD_083",
+          "count": 3
+        },
+        {
+          "id": "SOR_132",
+          "count": 3
+        },
+        {
+          "id": "SOR_119",
+          "count": 2
+        },
+        {
+          "id": "SOR_136",
+          "count": 1
+        },
+        {
+          "id": "SHD_085",
+          "count": 3
+        },
+        {
+          "id": "SOR_130",
+          "count": 3
+        },
+        {
+          "id": "SOR_225",
+          "count": 2
+        },
+        {
+          "id": "SOR_112",
+          "count": 2
+        },
+        {
+          "id": "SOR_131",
+          "count": 3
+        },
+        {
+          "id": "SOR_139",
+          "count": 3
+        },
+        {
+          "id": "SOR_232",
+          "count": 2
+        },
+        {
+          "id": "SOR_089",
+          "count": 1
+        },
+        {
+          "id": "SHD_238",
+          "count": 3
+        },
+        {
+          "id": "SHD_236",
+          "count": 2
+        },
+        {
+          "id": "SOR_092",
+          "count": 3
+        }
+      ],
+      "sideboard": []
+    },
+    "added_at": "2026-02-28T13:05:14.296489+00:00"
+  },
+  {
+    "deck_id": "3c5323a8cb5f",
+    "pool": "starter",
+    "swudb": {
+      "metadata": {
+        "name": "Ahsoka Starter \u2013 TWI Upgrade",
+        "author": "deployyourleadergaming"
+      },
+      "leader": {
+        "id": "TWI_011",
+        "count": 1
+      },
+      "base": {
+        "id": "TWI_024",
+        "count": 1
+      },
+      "deck": [
+        {
+          "id": "TWI_094",
+          "count": 3
+        },
+        {
+          "id": "TWI_111",
+          "count": 3
+        },
+        {
+          "id": "TWI_241",
+          "count": 3
+        },
+        {
+          "id": "TWI_147",
+          "count": 3
+        },
+        {
+          "id": "TWI_106",
+          "count": 3
+        },
+        {
+          "id": "TWI_248",
+          "count": 3
+        },
+        {
+          "id": "TWI_090",
+          "count": 3
+        },
+        {
+          "id": "TWI_097",
+          "count": 3
+        },
+        {
+          "id": "TWI_092",
+          "count": 3
+        },
+        {
+          "id": "TWI_142",
+          "count": 3
+        },
+        {
+          "id": "TWI_110",
+          "count": 3
+        },
+        {
+          "id": "TWI_144",
+          "count": 3
+        },
+        {
+          "id": "TWI_091",
+          "count": 3
+        },
+        {
+          "id": "TWI_251",
+          "count": 1
+        },
+        {
+          "id": "TWI_246",
+          "count": 1
+        },
+        {
+          "id": "TWI_141",
+          "count": 3
+        },
+        {
+          "id": "TWI_114",
+          "count": 3
+        },
+        {
+          "id": "TWI_129",
+          "count": 3
+        }
+      ],
+      "sideboard": []
+    },
+    "added_at": "2026-02-28T13:05:59.709621+00:00"
   }
 ]

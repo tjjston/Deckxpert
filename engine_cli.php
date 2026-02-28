@@ -177,7 +177,8 @@ function initializeEngineGlobals(array $deckA, array $deckB): void
     $MakeStartTurnBackup = false;
     $conceded = false;
 
-    $playerHealths = ['30', '30'];
+    // Engine stores base damage taken, not remaining HP.
+    $playerHealths = ['0', '0'];
 
     $p1Hand = [];
     $p1Deck = $deckA['main'];

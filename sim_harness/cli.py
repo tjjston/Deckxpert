@@ -77,10 +77,11 @@ def _cards_to_expanded_ids(swudb: dict[str, Any]) -> tuple[list[str], list[str]]
     leader = swudb.get("leader", {})
     base = swudb.get("base", {})
 
-    if isinstance(leader, dict) and leader.get("id"):
-        material.extend([str(leader["id"])] * int(leader.get("count", 1)))
+    # Engine expects base at character index 0 and leader at CharacterPieces() offset.
     if isinstance(base, dict) and base.get("id"):
         material.extend([str(base["id"])] * int(base.get("count", 1)))
+    if isinstance(leader, dict) and leader.get("id"):
+        material.extend([str(leader["id"])] * int(leader.get("count", 1)))
 
     main: list[str] = []
     for card in swudb.get("deck", []):

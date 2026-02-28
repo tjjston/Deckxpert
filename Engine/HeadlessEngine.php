@@ -9,6 +9,7 @@ include_once __DIR__ . '/../Libraries/StatFunctions.php';
 include_once __DIR__ . '/../Libraries/PlayerSettings.php';
 include_once __DIR__ . '/../Libraries/UILibraries2.php';
 include_once __DIR__ . '/../AI/PlayerMacros.php';
+include_once __DIR__ . '/../AI/CombatDummy.php';
 include_once __DIR__ . '/../Libraries/CoreLibraries.php';
 include_once __DIR__ . '/../WriteLog.php';
 include_once __DIR__ . '/Action.php';
@@ -41,23 +42,104 @@ if (!function_exists('GamestateUnsanitize')) {
 }
 
 
+if (!function_exists('headlessBackupExcludedGlobals')) {
+  function headlessBackupExcludedGlobals(): array
+  {
+    return [
+      'GLOBALS',
+      '_SERVER',
+      '_GET',
+      '_POST',
+      '_FILES',
+      '_COOKIE',
+      '_SESSION',
+      '_REQUEST',
+      '_ENV',
+      'argc',
+      'argv',
+      '__headlessGamestateBackups',
+    ];
+  }
+}
+
+if (!function_exists('headlessCaptureGamestateSnapshot')) {
+  function headlessCaptureGamestateSnapshot(): array
+  {
+    $excluded = array_flip(headlessBackupExcludedGlobals());
+    $snapshot = [];
+    foreach ($GLOBALS as $key => $value) {
+      if (isset($excluded[$key])) continue;
+      if (is_object($value) || is_resource($value)) continue;
+      $snapshot[$key] = $value;
+    }
+    return $snapshot;
+  }
+}
+
+if (!function_exists('headlessRestoreGamestateSnapshot')) {
+  function headlessRestoreGamestateSnapshot(array $snapshot): void
+  {
+    $excluded = array_flip(headlessBackupExcludedGlobals());
+    foreach (array_keys($GLOBALS) as $key) {
+      if (isset($excluded[$key])) continue;
+      if (!array_key_exists($key, $snapshot)) unset($GLOBALS[$key]);
+    }
+    foreach ($snapshot as $key => $value) {
+      $GLOBALS[$key] = $value;
+    }
+  }
+}
+
 if (!function_exists('MakeGamestateBackup')) {
   function MakeGamestateBackup($filename = "gamestateBackup.txt")
   {
-    // No-op in headless mode.
+    if (!isset($GLOBALS['__headlessGamestateBackups']) || !is_array($GLOBALS['__headlessGamestateBackups'])) {
+      $GLOBALS['__headlessGamestateBackups'] = [];
+    }
+    $GLOBALS['__headlessGamestateBackups'][strval($filename)] = headlessCaptureGamestateSnapshot();
+  }
+}
+
+if (!function_exists('RevertGamestate')) {
+  function RevertGamestate($filename = "gamestateBackup.txt")
+  {
+    $name = strval($filename);
+    $backups = $GLOBALS['__headlessGamestateBackups'] ?? [];
+    if (!is_array($backups)) $backups = [];
+
+    if (!array_key_exists($name, $backups)) {
+      if (array_key_exists('gamestateBackup.txt', $backups)) {
+        $name = 'gamestateBackup.txt';
+      } else {
+        // Mirror browser-engine behavior where revert suppresses write/advance.
+        $GLOBALS['skipWriteGamestate'] = true;
+        return;
+      }
+    }
+
+    headlessRestoreGamestateSnapshot($backups[$name]);
+    $GLOBALS['skipWriteGamestate'] = true;
   }
 }
 
 if (!function_exists('MakeStartTurnBackup')) {
   function MakeStartTurnBackup()
   {
-    // No-op in headless mode.
+    if (!isset($GLOBALS['__headlessGamestateBackups']) || !is_array($GLOBALS['__headlessGamestateBackups'])) {
+      $GLOBALS['__headlessGamestateBackups'] = [];
+    }
+    $backups = &$GLOBALS['__headlessGamestateBackups'];
+    if (array_key_exists('beginTurnGamestate.txt', $backups)) {
+      $backups['lastTurnGamestate.txt'] = $backups['beginTurnGamestate.txt'];
+    }
+    $backups['beginTurnGamestate.txt'] = headlessCaptureGamestateSnapshot();
   }
 }
 
 if (!function_exists('UpdateGameState')) {
   function UpdateGameState($playerID): void
   {
+    DoGamestateUpdate();
     BuildMyGamestate($playerID);
   }
 }
@@ -65,14 +147,212 @@ if (!function_exists('UpdateGameState')) {
 if (!function_exists('DoGamestateUpdate')) {
   function DoGamestateUpdate(): void
   {
-    // Headless mode does not persist serialized game files.
+    global $mainPlayerGamestateStillBuilt, $myStateBuiltFor;
+    if (($mainPlayerGamestateStillBuilt ?? 0) == 1) UpdateMainPlayerGameStateInner();
+    else if (($myStateBuiltFor ?? -1) != -1) UpdateGameStateInner();
+  }
+}
+
+if (!function_exists('UpdateGameStateInner')) {
+  function UpdateGameStateInner(): void
+  {
+    global $myStateBuiltFor;
+    global $p1Deck, $p1Hand, $p1Resources, $p1CharEquip, $p1Arsenal, $playerHealths, $p1Auras, $p1Pitch, $p1Banish, $p1ClassState, $p1Items;
+    global $p1CharacterEffects, $p1Discard, $p1CardStats, $p1TurnStats;
+    global $p2Deck, $p2Hand, $p2Resources, $p2CharEquip, $p2Arsenal, $p2Auras, $p2Pitch, $p2Banish, $p2ClassState, $p2Items;
+    global $p2CharacterEffects, $p2Discard, $p2CardStats, $p2TurnStats;
+    global $myDeck, $myHand, $myResources, $myCharacter, $myArsenal, $myHealth, $myAuras, $myPitch, $myBanish, $myClassState, $myItems;
+    global $myCharacterEffects, $myDiscard, $myCardStats, $myTurnStats;
+    global $theirDeck, $theirHand, $theirResources, $theirCharacter, $theirArsenal, $theirHealth, $theirAuras, $theirPitch, $theirBanish, $theirClassState, $theirItems;
+    global $theirCharacterEffects, $theirDiscard, $theirCardStats, $theirTurnStats;
+    global $p1Material, $p2Material, $myMaterial, $theirMaterial;
+
+    $activePlayer = intval($myStateBuiltFor ?? -1);
+    if ($activePlayer === 1) {
+      $p1Deck = $myDeck;
+      $p1Hand = $myHand;
+      $p1Resources = $myResources;
+      $p1CharEquip = $myCharacter;
+      $p1Arsenal = $myArsenal;
+      $playerHealths[0] = $myHealth;
+      $p1Items = $myItems;
+      $p1Auras = $myAuras;
+      $p1Pitch = $myPitch;
+      $p1Banish = $myBanish;
+      $p1ClassState = $myClassState;
+      $p1CharacterEffects = $myCharacterEffects;
+      $p1Discard = $myDiscard;
+      $p1Material = $myMaterial;
+      $p1CardStats = $myCardStats;
+      $p1TurnStats = $myTurnStats;
+
+      $p2Deck = $theirDeck;
+      $p2Hand = $theirHand;
+      $p2Resources = $theirResources;
+      $p2CharEquip = $theirCharacter;
+      $p2Arsenal = $theirArsenal;
+      $playerHealths[1] = $theirHealth;
+      $p2Items = $theirItems;
+      $p2Auras = $theirAuras;
+      $p2Pitch = $theirPitch;
+      $p2Banish = $theirBanish;
+      $p2ClassState = $theirClassState;
+      $p2CharacterEffects = $theirCharacterEffects;
+      $p2Discard = $theirDiscard;
+      $p2Material = $theirMaterial;
+      $p2CardStats = $theirCardStats;
+      $p2TurnStats = $theirTurnStats;
+      return;
+    }
+
+    if ($activePlayer === 2) {
+      $p2Deck = $myDeck;
+      $p2Hand = $myHand;
+      $p2Resources = $myResources;
+      $p2CharEquip = $myCharacter;
+      $p2Arsenal = $myArsenal;
+      $playerHealths[1] = $myHealth;
+      $p2Items = $myItems;
+      $p2Auras = $myAuras;
+      $p2Pitch = $myPitch;
+      $p2Banish = $myBanish;
+      $p2ClassState = $myClassState;
+      $p2CharacterEffects = $myCharacterEffects;
+      $p2Discard = $myDiscard;
+      $p2Material = $myMaterial;
+      $p2CardStats = $myCardStats;
+      $p2TurnStats = $myTurnStats;
+
+      $p1Deck = $theirDeck;
+      $p1Hand = $theirHand;
+      $p1Resources = $theirResources;
+      $p1CharEquip = $theirCharacter;
+      $p1Arsenal = $theirArsenal;
+      $playerHealths[0] = $theirHealth;
+      $p1Items = $theirItems;
+      $p1Auras = $theirAuras;
+      $p1Pitch = $theirPitch;
+      $p1Banish = $theirBanish;
+      $p1ClassState = $theirClassState;
+      $p1CharacterEffects = $theirCharacterEffects;
+      $p1Discard = $theirDiscard;
+      $p1Material = $theirMaterial;
+      $p1CardStats = $theirCardStats;
+      $p1TurnStats = $theirTurnStats;
+    }
+  }
+}
+
+if (!function_exists('UpdateMainPlayerGameStateInner')) {
+  function UpdateMainPlayerGameStateInner(): void
+  {
+    global $mainPlayerGamestateStillBuilt, $mpgBuiltFor;
+    global $mainHand, $mainDeck, $mainResources, $mainCharacter, $mainArsenal, $mainHealth, $mainAuras, $mainPitch, $mainBanish, $mainClassState, $mainItems;
+    global $mainCharacterEffects, $mainDiscard;
+    global $defHand, $defDeck, $defResources, $defCharacter, $defArsenal, $defHealth, $defAuras, $defPitch, $defBanish, $defClassState, $defItems;
+    global $defCharacterEffects, $defDiscard;
+    global $p1Deck, $p1Hand, $p1Resources, $p1CharEquip, $p1Arsenal, $playerHealths, $p1Auras, $p1Pitch, $p1Banish, $p1ClassState, $p1Items;
+    global $p1CharacterEffects, $p1Discard;
+    global $p2Deck, $p2Hand, $p2Resources, $p2CharEquip, $p2Arsenal, $p2Auras, $p2Pitch, $p2Banish, $p2ClassState, $p2Items;
+    global $p2CharacterEffects, $p2Discard;
+    global $p1Material, $p2Material, $mainMaterial, $defMaterial;
+    global $p1CardStats, $p2CardStats, $mainCardStats, $defCardStats;
+    global $p1TurnStats, $p2TurnStats, $mainTurnStats, $defTurnStats;
+
+    $p1Deck = $mpgBuiltFor == 1 ? $mainDeck : $defDeck;
+    $p1Hand = $mpgBuiltFor == 1 ? $mainHand : $defHand;
+    $p1Resources = $mpgBuiltFor == 1 ? $mainResources : $defResources;
+    $p1CharEquip = $mpgBuiltFor == 1 ? $mainCharacter : $defCharacter;
+    $p1Arsenal = $mpgBuiltFor == 1 ? $mainArsenal : $defArsenal;
+    $playerHealths[0] = $mpgBuiltFor == 1 ? $mainHealth : $defHealth;
+    $p1Items = $mpgBuiltFor == 1 ? $mainItems : $defItems;
+    $p1Auras = $mpgBuiltFor == 1 ? $mainAuras : $defAuras;
+    $p1Pitch = $mpgBuiltFor == 1 ? $mainPitch : $defPitch;
+    $p1Banish = $mpgBuiltFor == 1 ? $mainBanish : $defBanish;
+    $p1ClassState = $mpgBuiltFor == 1 ? $mainClassState : $defClassState;
+    $p1CharacterEffects = $mpgBuiltFor == 1 ? $mainCharacterEffects : $defCharacterEffects;
+    $p1Discard = $mpgBuiltFor == 1 ? $mainDiscard : $defDiscard;
+    $p1Material = $mpgBuiltFor == 1 ? $mainMaterial : $defMaterial;
+    $p1CardStats = $mpgBuiltFor == 1 ? $mainCardStats : $defCardStats;
+    $p1TurnStats = $mpgBuiltFor == 1 ? $mainTurnStats : $defTurnStats;
+
+    $p2Deck = $mpgBuiltFor == 2 ? $mainDeck : $defDeck;
+    $p2Hand = $mpgBuiltFor == 2 ? $mainHand : $defHand;
+    $p2Resources = $mpgBuiltFor == 2 ? $mainResources : $defResources;
+    $p2CharEquip = $mpgBuiltFor == 2 ? $mainCharacter : $defCharacter;
+    $p2Arsenal = $mpgBuiltFor == 2 ? $mainArsenal : $defArsenal;
+    $playerHealths[1] = $mpgBuiltFor == 2 ? $mainHealth : $defHealth;
+    $p2Items = $mpgBuiltFor == 2 ? $mainItems : $defItems;
+    $p2Auras = $mpgBuiltFor == 2 ? $mainAuras : $defAuras;
+    $p2Pitch = $mpgBuiltFor == 2 ? $mainPitch : $defPitch;
+    $p2Banish = $mpgBuiltFor == 2 ? $mainBanish : $defBanish;
+    $p2ClassState = $mpgBuiltFor == 2 ? $mainClassState : $defClassState;
+    $p2CharacterEffects = $mpgBuiltFor == 2 ? $mainCharacterEffects : $defCharacterEffects;
+    $p2Discard = $mpgBuiltFor == 2 ? $mainDiscard : $defDiscard;
+    $p2Material = $mpgBuiltFor == 2 ? $mainMaterial : $defMaterial;
+    $p2CardStats = $mpgBuiltFor == 2 ? $mainCardStats : $defCardStats;
+    $p2TurnStats = $mpgBuiltFor == 2 ? $mainTurnStats : $defTurnStats;
+    $mainPlayerGamestateStillBuilt = 1;
+  }
+}
+
+if (!function_exists('UpdateMainPlayerGameState')) {
+  function UpdateMainPlayerGameState(): void
+  {
+    DoGamestateUpdate();
   }
 }
 
 if (!function_exists('BuildMainPlayerGamestate')) {
   function BuildMainPlayerGamestate(): void
   {
-    // Compatibility alias for mixed-case calls.
+    global $mainPlayer, $mainPlayerGamestateStillBuilt, $playerHealths;
+    global $mpgBuiltFor;
+    global $mainHand, $mainDeck, $mainResources, $mainCharacter, $mainArsenal, $mainHealth, $mainAuras, $mainPitch, $mainBanish, $mainClassState, $mainItems;
+    global $mainCharacterEffects, $mainDiscard, $mainMaterial, $mainCardStats, $mainTurnStats;
+    global $defHand, $defDeck, $defResources, $defCharacter, $defArsenal, $defHealth, $defAuras, $defPitch, $defBanish, $defClassState, $defItems;
+    global $defCharacterEffects, $defDiscard, $defMaterial, $defCardStats, $defTurnStats;
+    global $p1Deck, $p1Hand, $p1Resources, $p1CharEquip, $p1Arsenal, $p1Auras, $p1Pitch, $p1Banish, $p1ClassState, $p1Items, $p1CharacterEffects, $p1Discard, $p1Material, $p1CardStats, $p1TurnStats;
+    global $p2Deck, $p2Hand, $p2Resources, $p2CharEquip, $p2Arsenal, $p2Auras, $p2Pitch, $p2Banish, $p2ClassState, $p2Items, $p2CharacterEffects, $p2Discard, $p2Material, $p2CardStats, $p2TurnStats;
+
+    DoGamestateUpdate();
+    $mpgBuiltFor = $mainPlayer;
+
+    $mainHand = $mainPlayer == 1 ? $p1Hand : $p2Hand;
+    $mainDeck = $mainPlayer == 1 ? $p1Deck : $p2Deck;
+    $mainResources = $mainPlayer == 1 ? $p1Resources : $p2Resources;
+    $mainCharacter = $mainPlayer == 1 ? $p1CharEquip : $p2CharEquip;
+    $mainArsenal = $mainPlayer == 1 ? $p1Arsenal : $p2Arsenal;
+    $mainHealth = $mainPlayer == 1 ? $playerHealths[0] : $playerHealths[1];
+    $mainItems = $mainPlayer == 1 ? $p1Items : $p2Items;
+    $mainAuras = $mainPlayer == 1 ? $p1Auras : $p2Auras;
+    $mainPitch = $mainPlayer == 1 ? $p1Pitch : $p2Pitch;
+    $mainBanish = $mainPlayer == 1 ? $p1Banish : $p2Banish;
+    $mainClassState = $mainPlayer == 1 ? $p1ClassState : $p2ClassState;
+    $mainCharacterEffects = $mainPlayer == 1 ? $p1CharacterEffects : $p2CharacterEffects;
+    $mainDiscard = $mainPlayer == 1 ? $p1Discard : $p2Discard;
+    $mainMaterial = $mainPlayer == 1 ? $p1Material : $p2Material;
+    $mainCardStats = $mainPlayer == 1 ? $p1CardStats : $p2CardStats;
+    $mainTurnStats = $mainPlayer == 1 ? $p1TurnStats : $p2TurnStats;
+
+    $defHand = $mainPlayer == 1 ? $p2Hand : $p1Hand;
+    $defDeck = $mainPlayer == 1 ? $p2Deck : $p1Deck;
+    $defResources = $mainPlayer == 1 ? $p2Resources : $p1Resources;
+    $defCharacter = $mainPlayer == 1 ? $p2CharEquip : $p1CharEquip;
+    $defArsenal = $mainPlayer == 1 ? $p2Arsenal : $p1Arsenal;
+    $defHealth = $mainPlayer == 1 ? $playerHealths[1] : $playerHealths[0];
+    $defItems = $mainPlayer == 1 ? $p2Items : $p1Items;
+    $defAuras = $mainPlayer == 1 ? $p2Auras : $p1Auras;
+    $defPitch = $mainPlayer == 1 ? $p2Pitch : $p1Pitch;
+    $defBanish = $mainPlayer == 1 ? $p2Banish : $p1Banish;
+    $defClassState = $mainPlayer == 1 ? $p2ClassState : $p1ClassState;
+    $defCharacterEffects = $mainPlayer == 1 ? $p2CharacterEffects : $p1CharacterEffects;
+    $defDiscard = $mainPlayer == 1 ? $p2Discard : $p1Discard;
+    $defMaterial = $mainPlayer == 1 ? $p2Material : $p1Material;
+    $defCardStats = $mainPlayer == 1 ? $p2CardStats : $p1CardStats;
+    $defTurnStats = $mainPlayer == 1 ? $p2TurnStats : $p1TurnStats;
+
+    $mainPlayerGamestateStillBuilt = 1;
   }
 }
 
@@ -87,40 +367,80 @@ if (!function_exists('BuildMyGamestate')) {
     global $myCharacterEffects, $myDiscard, $myCardStats, $myTurnStats, $myMaterial;
     global $theirDeck, $theirHand, $theirResources, $theirCharacter, $theirArsenal, $theirHealth, $theirAuras, $theirPitch, $theirBanish, $theirClassState, $theirItems;
     global $theirCharacterEffects, $theirDiscard, $theirCardStats, $theirTurnStats, $theirMaterial;
+    global $myStateBuiltFor;
+    global $mainPlayerGamestateStillBuilt;
 
-    $myHand = $playerID == 1 ? $p1Hand : $p2Hand;
-    $myDeck = $playerID == 1 ? $p1Deck : $p2Deck;
-    $myResources = $playerID == 1 ? $p1Resources : $p2Resources;
-    $myCharacter = $playerID == 1 ? $p1CharEquip : $p2CharEquip;
-    $myArsenal = $playerID == 1 ? $p1Arsenal : $p2Arsenal;
-    $myHealth = $playerID == 1 ? ($playerHealths[0] ?? 0) : ($playerHealths[1] ?? 0);
-    $myItems = $playerID == 1 ? $p1Items : $p2Items;
-    $myAuras = $playerID == 1 ? $p1Auras : $p2Auras;
-    $myDiscard = $playerID == 1 ? $p1Discard : $p2Discard;
-    $myPitch = $playerID == 1 ? $p1Pitch : $p2Pitch;
-    $myBanish = $playerID == 1 ? $p1Banish : $p2Banish;
-    $myClassState = $playerID == 1 ? $p1ClassState : $p2ClassState;
-    $myCharacterEffects = $playerID == 1 ? $p1CharacterEffects : $p2CharacterEffects;
-    $myMaterial = $playerID == 1 ? $p1Material : $p2Material;
-    $myCardStats = $playerID == 1 ? $p1CardStats : $p2CardStats;
-    $myTurnStats = $playerID == 1 ? $p1TurnStats : $p2TurnStats;
+    $mainPlayerGamestateStillBuilt = 0;
+    $myStateBuiltFor = intval($playerID);
+    if (intval($playerID) === 1) {
+      $myHand = $p1Hand;
+      $myDeck = $p1Deck;
+      $myResources = $p1Resources;
+      $myCharacter = $p1CharEquip;
+      $myArsenal = $p1Arsenal;
+      $myItems = $p1Items;
+      $myAuras = $p1Auras;
+      $myDiscard = $p1Discard;
+      $myPitch = $p1Pitch;
+      $myBanish = $p1Banish;
+      $myClassState = $p1ClassState;
+      $myCharacterEffects = $p1CharacterEffects;
+      $myMaterial = $p1Material;
+      $myCardStats = $p1CardStats;
+      $myTurnStats = $p1TurnStats;
 
-    $theirHand = $playerID == 1 ? $p2Hand : $p1Hand;
-    $theirDeck = $playerID == 1 ? $p2Deck : $p1Deck;
-    $theirResources = $playerID == 1 ? $p2Resources : $p1Resources;
-    $theirCharacter = $playerID == 1 ? $p2CharEquip : $p1CharEquip;
-    $theirArsenal = $playerID == 1 ? $p2Arsenal : $p1Arsenal;
-    $theirHealth = $playerID == 1 ? ($playerHealths[1] ?? 0) : ($playerHealths[0] ?? 0);
-    $theirItems = $playerID == 1 ? $p2Items : $p1Items;
-    $theirAuras = $playerID == 1 ? $p2Auras : $p1Auras;
-    $theirDiscard = $playerID == 1 ? $p2Discard : $p1Discard;
-    $theirPitch = $playerID == 1 ? $p2Pitch : $p1Pitch;
-    $theirBanish = $playerID == 1 ? $p2Banish : $p1Banish;
-    $theirClassState = $playerID == 1 ? $p2ClassState : $p1ClassState;
-    $theirCharacterEffects = $playerID == 1 ? $p2CharacterEffects : $p1CharacterEffects;
-    $theirMaterial = $playerID == 1 ? $p2Material : $p1Material;
-    $theirCardStats = $playerID == 1 ? $p2CardStats : $p1CardStats;
-    $theirTurnStats = $playerID == 1 ? $p2TurnStats : $p1TurnStats;
+      $theirHand = $p2Hand;
+      $theirDeck = $p2Deck;
+      $theirResources = $p2Resources;
+      $theirCharacter = $p2CharEquip;
+      $theirArsenal = $p2Arsenal;
+      $theirItems = $p2Items;
+      $theirAuras = $p2Auras;
+      $theirDiscard = $p2Discard;
+      $theirPitch = $p2Pitch;
+      $theirBanish = $p2Banish;
+      $theirClassState = $p2ClassState;
+      $theirCharacterEffects = $p2CharacterEffects;
+      $theirMaterial = $p2Material;
+      $theirCardStats = $p2CardStats;
+      $theirTurnStats = $p2TurnStats;
+      $myHealth = $playerHealths[0] ?? 0;
+      $theirHealth = $playerHealths[1] ?? 0;
+    } else {
+      $myHand = $p2Hand;
+      $myDeck = $p2Deck;
+      $myResources = $p2Resources;
+      $myCharacter = $p2CharEquip;
+      $myArsenal = $p2Arsenal;
+      $myItems = $p2Items;
+      $myAuras = $p2Auras;
+      $myDiscard = $p2Discard;
+      $myPitch = $p2Pitch;
+      $myBanish = $p2Banish;
+      $myClassState = $p2ClassState;
+      $myCharacterEffects = $p2CharacterEffects;
+      $myMaterial = $p2Material;
+      $myCardStats = $p2CardStats;
+      $myTurnStats = $p2TurnStats;
+
+      $theirHand = $p1Hand;
+      $theirDeck = $p1Deck;
+      $theirResources = $p1Resources;
+      $theirCharacter = $p1CharEquip;
+      $theirArsenal = $p1Arsenal;
+      $theirItems = $p1Items;
+      $theirAuras = $p1Auras;
+      $theirDiscard = $p1Discard;
+      $theirPitch = $p1Pitch;
+      $theirBanish = $p1Banish;
+      $theirClassState = $p1ClassState;
+      $theirCharacterEffects = $p1CharacterEffects;
+      $theirMaterial = $p1Material;
+      $theirCardStats = $p1CardStats;
+      $theirTurnStats = $p1TurnStats;
+      $myHealth = $playerHealths[1] ?? 0;
+      $theirHealth = $playerHealths[0] ?? 0;
+    }
   }
 }
 
@@ -160,9 +480,87 @@ function normalizeDecklistForHeadless(mixed $deck): array
   throw new InvalidArgumentException('Deck must be string or object with material/main arrays.');
 }
 
+function bootstrapHeadlessStartOfGame(): void
+{
+  global $firstPlayer, $mainPlayer, $currentPlayer, $otherPlayer, $layerPriority, $initiativePlayer, $initiativeTaken;
+  global $MakeStartTurnBackup, $MakeStartGameBackup;
+  global $p1Material, $p2Material;
+
+  array_push($layerPriority, ShouldHoldPriority(1), ShouldHoldPriority(2));
+
+  $mainPlayer = $firstPlayer;
+  $currentPlayer = $firstPlayer;
+  $otherPlayer = ($currentPlayer == 1 ? 2 : 1);
+  StatsStartTurn();
+
+  $MakeStartTurnBackup = false;
+  $MakeStartGameBackup = false;
+
+  $orderedP1 = headlessMaterialBaseFirst($p1Material);
+  if (isset($orderedP1[0])) AddCharacter($orderedP1[0], 1);
+  if (isset($orderedP1[MaterialPieces()])) AddCharacter($orderedP1[MaterialPieces()], 1);
+
+  if (count($p2Material) == 1 && ($p2Material[0] ?? '') === "DUMMY") {
+    AddCharacter("DUMMY", 2);
+  } else {
+    $orderedP2 = headlessMaterialBaseFirst($p2Material);
+    if (isset($orderedP2[0])) AddCharacter($orderedP2[0], 2);
+    if (isset($orderedP2[MaterialPieces()])) AddCharacter($orderedP2[MaterialPieces()], 2);
+  }
+
+  $initiativePlayer = $firstPlayer;
+  $initiativeTaken = 0;
+
+  for ($i = 0; $i < 10; $i++) {
+    AddDecisionQueue("SHUFFLEDECK", 1, "SKIPSEED");
+    AddDecisionQueue("SHUFFLEDECK", 2, "SKIPSEED");
+  }
+  AddDecisionQueue("STARTGAME", $initiativePlayer, "-");
+  ProcessDecisionQueue();
+  DoGamestateUpdate();
+  BuildMyGamestate(intval($initiativePlayer));
+}
+
+function headlessMaterialBaseFirst(array $material): array
+{
+  $cards = array_values(array_map('strval', $material));
+  if (count($cards) < 2) return $cards;
+
+  // Base should be slot 0 for engine semantics. Pick highest HP card as base.
+  $hp0 = intval(CardHP($cards[0]));
+  $hp1 = intval(CardHP($cards[1]));
+  if ($hp1 > $hp0) {
+    return [$cards[1], $cards[0]];
+  }
+  return $cards;
+}
+
+function normalizeHeadlessOpeningHands(int $targetHandSize = 6): void
+{
+  if ($targetHandSize < 0) $targetHandSize = 0;
+
+  foreach ([1, 2] as $player) {
+    BuildMyGamestate($player);
+    $hand = &GetHand($player);
+    $deck = &GetDeck($player);
+
+    while (count($hand) < $targetHandSize && count($deck) > 0) {
+      $hand[] = array_shift($deck);
+    }
+    while (count($hand) > $targetHandSize) {
+      $cardId = array_pop($hand);
+      if ($cardId === null) break;
+      $deck[] = $cardId;
+    }
+  }
+
+  DoGamestateUpdate();
+  BuildMyGamestate(1);
+}
+
 function initHeadlessGame(array $deckA, array $deckB, int $seed): void
 {
-  global $gameName, $playerID, $otherPlayer, $skipWriteGamestate, $mainPlayerGamestateStillBuilt, $makeCheckpoint, $makeBlockBackup, $MakeStartTurnBackup, $conceded;
+  global $gameName, $playerID, $otherPlayer, $skipWriteGamestate, $mainPlayerGamestateStillBuilt, $makeCheckpoint, $makeBlockBackup, $MakeStartTurnBackup, $MakeStartGameBackup, $conceded;
   global $playerHealths, $winner, $firstPlayer, $currentPlayer, $currentRound, $turn, $actionPoints, $combatChain, $combatChainState;
   global $currentTurnEffects, $currentTurnEffectsFromCombat, $nextTurnEffects, $decisionQueue, $dqVars, $dqState, $layers, $layerPriority;
   global $mainPlayer, $lastPlayed, $chainLinks, $chainLinkSummary, $p1Key, $p2Key, $permanentUniqueIDCounter, $inGameStatus, $currentPlayerActivity;
@@ -179,13 +577,16 @@ function initHeadlessGame(array $deckA, array $deckB, int $seed): void
   $makeCheckpoint = 0;
   $makeBlockBackup = 0;
   $MakeStartTurnBackup = false;
+  $MakeStartGameBackup = false;
   $conceded = false;
 
-  $playerHealths = ['30', '30'];
+  // Engine stores base damage taken, not remaining HP.
+  // Canonical start state is 0 damage on each base.
+  $playerHealths = ['0', '0'];
 
   $p1Hand = [];
   $p1Deck = $deckA['main'];
-  $p1CharEquip = $deckA['material'];
+  $p1CharEquip = [];
   $p1Resources = ['0', '0'];
   $p1Arsenal = [];
   $p1Items = [];
@@ -204,7 +605,7 @@ function initHeadlessGame(array $deckA, array $deckB, int $seed): void
 
   $p2Hand = [];
   $p2Deck = $deckB['main'];
-  $p2CharEquip = $deckB['material'];
+  $p2CharEquip = [];
   $p2Resources = ['0', '0'];
   $p2Arsenal = [];
   $p2Items = [];
@@ -264,6 +665,10 @@ function initHeadlessGame(array $deckA, array $deckB, int $seed): void
   mt_srand($seed);
   $randomSeeded = true;
 
+  BuildMyGamestate(1);
+  bootstrapHeadlessStartOfGame();
+  // Sim harness rule: always begin simulated matches with 6 cards in hand.
+  normalizeHeadlessOpeningHands(6);
   BuildMyGamestate(1);
 }
 
@@ -335,6 +740,7 @@ function headlessStateModel(): array
 
 function getObservation(int $player_id): array
 {
+  DoGamestateUpdate();
   $state = headlessStateModel();
   $opponent = $player_id === 1 ? 2 : 1;
   global $p1Hand, $p1Deck, $p2Hand, $p2Deck;
@@ -356,6 +762,8 @@ function getObservation(int $player_id): array
 
 function getLegalActions(int $player_id): array
 {
+  DoGamestateUpdate();
+  BuildMyGamestate($player_id);
   $engine = new LegalActions();
   $obs = Observation::fromGlobals();
   return array_map(static fn(Action $action) => $action->toArray(), $engine->getLegalActions($player_id, $obs));
@@ -363,6 +771,14 @@ function getLegalActions(int $player_id): array
 
 function applyAction(int $player_id, array $action): array
 {
+  global $skipWriteGamestate, $makeCheckpoint, $makeBlockBackup, $MakeStartTurnBackup;
+  $skipWriteGamestate = false;
+  $makeCheckpoint = 0;
+  $makeBlockBackup = 0;
+  $MakeStartTurnBackup = false;
+  DoGamestateUpdate();
+  BuildMyGamestate($player_id);
+
   $engine = new LegalActions();
   $engineAction = new Action(
     strval($action['type'] ?? 'unknown'),
@@ -374,6 +790,8 @@ function applyAction(int $player_id, array $action): array
     strval($action['inputText'] ?? '')
   );
   $result = $engine->applyAction($player_id, $engineAction);
+  DoGamestateUpdate();
+  BuildMyGamestate($player_id);
 
   return [
     'ok' => $result->ok,

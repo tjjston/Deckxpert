@@ -5,23 +5,133 @@ declare(strict_types=1);
 error_reporting(0);
 ini_set('display_errors', '0');
 ini_set('display_startup_errors', '0');
+if (!defined('HEADLESS_SIM')) define('HEADLESS_SIM', true);
+
+$GLOBALS['__runner_finished'] = false;
+$GLOBALS['__runner_checkpoint'] = 'boot';
+$GLOBALS['__runner_last_action'] = null;
+
+set_exception_handler(function (Throwable $e): void {
+  $GLOBALS['__runner_finished'] = true;
+  $payload = [
+    'error' => 'unhandled_exception',
+    'message' => $e->getMessage(),
+    'file' => $e->getFile(),
+    'line' => $e->getLine(),
+  ];
+  $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+  if ($json === false) $json = '{"error":"unhandled_exception","message":"json_encode_failed"}';
+  file_put_contents('php://stderr', $json . PHP_EOL);
+  echo $json;
+  exit(255);
+});
+
+register_shutdown_function(function (): void {
+  $err = error_get_last();
+  if ($err === null) return;
+  $fatalTypes = [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR];
+  if (!in_array($err['type'] ?? 0, $fatalTypes, true)) return;
+  $GLOBALS['__runner_finished'] = true;
+  $payload = [
+    'error' => 'fatal_error',
+    'message' => strval($err['message'] ?? 'unknown'),
+    'file' => strval($err['file'] ?? ''),
+    'line' => intval($err['line'] ?? 0),
+  ];
+  $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+  if ($json === false) $json = '{"error":"fatal_error","message":"json_encode_failed"}';
+  file_put_contents('php://stderr', $json . PHP_EOL);
+  echo $json;
+});
+
+register_shutdown_function(function (): void {
+  if (($GLOBALS['__runner_finished'] ?? false) === true) return;
+  $payload = [
+    'error' => 'premature_exit',
+    'message' => 'Runner exited before emitting final payload.',
+    'checkpoint' => strval($GLOBALS['__runner_checkpoint'] ?? 'unknown'),
+    'current_round' => intval($GLOBALS['currentRound'] ?? 0),
+    'current_player' => intval($GLOBALS['currentPlayer'] ?? 0),
+    'turn' => $GLOBALS['turn'] ?? [],
+    'last_action' => $GLOBALS['__runner_last_action'] ?? null,
+  ];
+  $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+  if ($json === false) $json = '{"error":"premature_exit","message":"json_encode_failed"}';
+  file_put_contents('php://stderr', $json . PHP_EOL);
+  echo $json;
+});
 
 require_once __DIR__ . '/../Engine/HeadlessEngine.php';
+$GLOBALS['__runner_checkpoint'] = 'required_engine';
 
-$options = getopt('', ['seed:', 'deck-a:', 'deck-b:', 'match-id:', 'log-format::', 'max-actions:', 'policy::']);
+$options = getopt('', ['seed:', 'deck-a:', 'deck-b:', 'deck-a-b64:', 'deck-b-b64:', 'match-id:', 'log-format::', 'max-actions::', 'policy::']);
 $seed = intval($options['seed'] ?? 0);
-$deckAInput = $options['deck-a'] ?? 'deck_a';
-$deckBInput = $options['deck-b'] ?? 'deck_b';
+$deckAInput = strval($options['deck-a'] ?? 'deck_a');
+$deckBInput = strval($options['deck-b'] ?? 'deck_b');
+$deckAB64 = $options['deck-a-b64'] ?? null;
+$deckBB64 = $options['deck-b-b64'] ?? null;
+if (is_string($deckAB64) && $deckAB64 !== '') {
+  $decoded = base64_decode($deckAB64, true);
+  if ($decoded !== false) $deckAInput = $decoded;
+}
+if (is_string($deckBB64) && $deckBB64 !== '') {
+  $decoded = base64_decode($deckBB64, true);
+  if ($decoded !== false) $deckBInput = $decoded;
+}
 $matchID = intval($options['match-id'] ?? 0);
 $logFormat = $options['log-format'] ?? 'json';
-$maxActions = max(1, intval($options['max-actions'] ?? 500));
-$policy = strtolower(trim(strval($options['policy'] ?? 'random_non_pass')));
+$maxActions = max(0, intval($options['max-actions'] ?? 0));
+$hardActionCap = 20000;
+$actionCap = $maxActions > 0 ? min($maxActions, $hardActionCap) : $hardActionCap;
+$policy = strtolower(trim(strval($options['policy'] ?? 'random_legal')));
 if (!in_array($policy, ['random_non_pass', 'random_legal', 'first_non_pass'], true)) {
-  $policy = 'random_non_pass';
+  $policy = 'random_legal';
 }
 
 $deckA = normalizeDecklistForHeadless($deckAInput);
 $deckB = normalizeDecklistForHeadless($deckBInput);
+$unknownDeckCardIds = [];
+
+function toEngineCardId(string $cardId, array &$unknownSetIds): string
+{
+  $trimmed = trim($cardId);
+  if ($trimmed === '') return $trimmed;
+  if (!str_contains($trimmed, '_')) return $trimmed;
+  $mapped = strval(UUIDLookup($trimmed));
+  if ($mapped !== '') return $mapped;
+  $unknownSetIds[$trimmed] = true;
+  return $trimmed;
+}
+
+function normalizeDeckCardIds(array $deck, array &$unknownSetIds): array
+{
+  $material = [];
+  foreach (array_values(array_map('strval', $deck['material'] ?? [])) as $cardId) {
+    $material[] = toEngineCardId($cardId, $unknownSetIds);
+  }
+
+  $main = [];
+  foreach (array_values(array_map('strval', $deck['main'] ?? [])) as $cardId) {
+    $main[] = toEngineCardId($cardId, $unknownSetIds);
+  }
+
+  return ['material' => $material, 'main' => $main];
+}
+
+$deckA = normalizeDeckCardIds($deckA, $unknownDeckCardIds);
+$deckB = normalizeDeckCardIds($deckB, $unknownDeckCardIds);
+if (count($unknownDeckCardIds) > 0) {
+  $unknownList = implode(', ', array_keys($unknownDeckCardIds));
+  $setCodes = [];
+  foreach (array_keys($unknownDeckCardIds) as $id) {
+    $parts = explode('_', strval($id), 2);
+    if (count($parts) === 2 && $parts[0] !== '') $setCodes[$parts[0]] = true;
+  }
+  $setList = implode(', ', array_keys($setCodes));
+  $suffix = $setList !== '' ? " (unsupported set codes in this engine build: $setList)" : "";
+  throw new InvalidArgumentException("Unknown set card IDs (no UUID mapping): $unknownList$suffix");
+}
+$GLOBALS['__runner_checkpoint'] = 'normalized_decks';
 
 $gameName = 'sim_' . $matchID;
 $GLOBALS['gameName'] = $gameName;
@@ -32,20 +142,45 @@ if ($logFormat === 'json') SetStructuredLogMode(true);
 
 initHeadlessGame($deckA, $deckB, $seed);
 $GLOBALS['gameName'] = $gameName;
+$GLOBALS['__runner_checkpoint'] = 'initialized_game';
+$openingState = phaseSnapshot();
 
-function deterministicChoiceIndex(array $actions, int $seed, int $step, int $playerId, int $round, string $phase): int
+function actionEntropyKey(int $playerId, array $action): string
 {
+  $resolvedCard = resolveCardReferenceRaw($playerId, $action);
+  return implode('|', [
+    strval($action['type'] ?? ''),
+    strval($action['mode'] ?? ''),
+    strval($action['buttonInput'] ?? ''),
+    strval($action['cardID'] ?? ''),
+    strval($action['chkCount'] ?? ''),
+    json_encode($action['chkInput'] ?? '', JSON_UNESCAPED_SLASHES),
+    strval($action['inputText'] ?? ''),
+    $resolvedCard,
+  ]);
+}
+
+function deterministicChoiceIndex(array $actions, int $seed, int $step, int $playerId, int $round, string $phase, string $policy): int
+{
+  $actionKeys = [];
+  foreach ($actions as $action) {
+    $actionKeys[] = actionEntropyKey($playerId, $action);
+  }
   $entropy = implode('|', [
     strval($seed),
     strval($step),
     strval($playerId),
     strval($round),
     $phase,
+    $policy,
     strval(count($actions)),
+    hash('sha256', implode('||', $actionKeys)),
   ]);
   $hash = hash('sha256', $entropy);
-  $sample = intval(hexdec(substr($hash, 0, 8)));
-  return $sample % max(1, count($actions));
+  $sampleRaw = hexdec(substr($hash, 0, 8));
+  $sample = is_numeric($sampleRaw) ? intval($sampleRaw) : 0;
+  $count = max(1, intval(count($actions)));
+  return intval($sample % $count);
 }
 
 function chooseAction(array $legalActions, int $seed, int $step, int $playerId, int $round, string $phase, string $policy): ?array
@@ -60,15 +195,21 @@ function chooseAction(array $legalActions, int $seed, int $step, int $playerId, 
   }
 
   $candidates = $legalActions;
+  $nonPass = array_values(array_filter(
+    $legalActions,
+    static fn(array $action): bool => strval($action['type'] ?? '') !== 'pass'
+  ));
+
   if ($policy === 'random_non_pass') {
-    $nonPass = array_values(array_filter(
-      $legalActions,
-      static fn(array $action): bool => strval($action['type'] ?? '') !== 'pass'
-    ));
     if (count($nonPass) > 0) $candidates = $nonPass;
   }
+  // Prevent degenerate "double-pass to end round" loops in main phase.
+  // Keep random_legal behavior everywhere else.
+  if ($policy === 'random_legal' && $phase === 'M' && count($nonPass) > 0) {
+    $candidates = $nonPass;
+  }
 
-  $choiceIndex = deterministicChoiceIndex($candidates, $seed, $step, $playerId, $round, $phase);
+  $choiceIndex = deterministicChoiceIndex($candidates, $seed, $step, $playerId, $round, $phase, $policy);
   return $candidates[$choiceIndex] ?? $candidates[0];
 }
 
@@ -83,7 +224,64 @@ function legalActionTypeSummary(array $legalActions): array
   return $summary;
 }
 
-function resolveCardReference(int $playerId, array $action): string
+function findPassAction(array $legalActions): ?array
+{
+  foreach ($legalActions as $action) {
+    if (strval($action['type'] ?? '') === 'pass') return $action;
+  }
+  return null;
+}
+
+function isDecisionLikeAction(array $action): bool
+{
+  $decisionTypes = [
+    'yesno',
+    'decision',
+    'choose_zone',
+    'choose_deck',
+    'opt_top',
+    'opt_bottom',
+    'multi_choose',
+    'dynamic_input',
+    'hand_top',
+    'hand_bottom',
+  ];
+  $type = strval($action['type'] ?? '');
+  return in_array($type, $decisionTypes, true);
+}
+
+function groupedEventsByRound(array $events): array
+{
+  $pages = [];
+  foreach ($events as $event) {
+    if (!is_array($event)) continue;
+    $round = intval($event['round'] ?? 0);
+    if ($round <= 0) continue;
+    if (!isset($pages[$round])) {
+      $pages[$round] = [
+        'round' => $round,
+        'start_step' => intval($event['step'] ?? 0),
+        'end_step' => intval($event['step'] ?? 0),
+        'total_steps' => 0,
+        'decision_steps' => 0,
+        'gameplay_steps' => 0,
+        'phases' => [],
+        'events' => [],
+      ];
+    }
+    $pages[$round]['end_step'] = intval($event['step'] ?? $pages[$round]['end_step']);
+    $pages[$round]['total_steps']++;
+    if (boolval($event['is_decision'] ?? false)) $pages[$round]['decision_steps']++;
+    else $pages[$round]['gameplay_steps']++;
+    $phase = strval($event['phase'] ?? '-');
+    $pages[$round]['phases'][$phase] = intval($pages[$round]['phases'][$phase] ?? 0) + 1;
+    $pages[$round]['events'][] = $event;
+  }
+  ksort($pages, SORT_NUMERIC);
+  return array_values($pages);
+}
+
+function resolveCardReferenceRaw(int $playerId, array $action): string
 {
   $type = strval($action['type'] ?? '');
   $cardID = $action['cardID'] ?? 0;
@@ -100,73 +298,358 @@ function resolveCardReference(int $playerId, array $action): string
     $arsenal = &GetArsenal($playerId);
     return strval($arsenal[intval($cardID)] ?? '');
   }
-  if ($type === 'play_item') {
+  if ($type === 'play_item' || $type === 'activate_item') {
     $items = &GetItems($playerId);
     return strval($items[intval($cardID)] ?? '');
   }
-  if ($type === 'play_ally') {
+  if ($type === 'play_ally' || $type === 'activate_ally') {
     $allies = &GetAllies($playerId);
     return strval($allies[intval($cardID)] ?? '');
+  }
+  if ($type === 'play_aura' || $type === 'activate_aura') {
+    $auras = &GetAuras($playerId);
+    return strval($auras[intval($cardID)] ?? '');
+  }
+  if ($type === 'choose_zone') {
+    $targetRef = strval($cardID);
+    if (preg_match('/^(MYALLY|THEIRALLY)-(\d+)$/', $targetRef, $matches) === 1) {
+      $zone = strval($matches[1] ?? '');
+      $index = intval($matches[2] ?? -1);
+      if ($index < 0) return '';
+      $targetPlayer = $zone === 'MYALLY' ? $playerId : ($playerId === 1 ? 2 : 1);
+      $allies = &GetAllies($targetPlayer);
+      return strval($allies[$index] ?? '');
+    }
   }
   if ($type === 'arsenal') return strval($cardID);
   return '';
 }
 
+function displayCardId(string $rawCardId): string
+{
+  if ($rawCardId === '') return '';
+  $mapped = strval(CardIDLookup($rawCardId));
+  if ($mapped !== '') return $mapped;
+  return $rawCardId;
+}
+
+function buildUnitDetail(int $playerId, array $allies, int $index): ?array
+{
+  $rawCardId = strval($allies[$index] ?? '');
+  if ($rawCardId === '') return null;
+
+  $ally = new Ally('MYALLY-' . $index, $playerId);
+  $arenaOverride = strval($allies[$index + 15] ?? 'NA');
+  $arena = $arenaOverride !== 'NA' ? $arenaOverride : strval(CardArenas($rawCardId));
+  $arenaUpper = strtoupper($arena);
+  if ($arenaUpper === 'GROUND') $arenaUpper = 'LAND';
+  if ($arenaUpper !== 'SPACE') $arenaUpper = 'LAND';
+
+  $isReady = !$ally->IsExhausted();
+  $printedPower = intval(CardPower($rawCardId));
+  $currentPower = intval($ally->CurrentPower());
+  $printedHp = intval(CardHP($rawCardId));
+  $maxHp = intval($ally->MaxHealth());
+  $damageTaken = intval($ally->Damage());
+  $currentHp = intval($ally->Health());
+  $upgrades = array_values(array_map('strval', $ally->GetUpgrades()));
+
+  return [
+    'raw_id' => $rawCardId,
+    'unique_id' => strval($allies[$index + 5] ?? ''),
+    'arena' => $arenaUpper,
+    'ready' => boolval($isReady),
+    'exhausted' => boolval(!$isReady),
+    'damage_taken' => $damageTaken,
+    'current_hp' => $currentHp,
+    'max_hp' => $maxHp,
+    'printed_hp' => $printedHp,
+    'hp_modifier' => $maxHp - $printedHp,
+    'current_power' => $currentPower,
+    'printed_power' => $printedPower,
+    'power_modifier' => $currentPower - $printedPower,
+    'counters' => intval($allies[$index + 6] ?? 0),
+    'times_attacked' => intval($allies[$index + 10] ?? 0),
+    'owner' => intval($allies[$index + 11] ?? $playerId),
+    'turns_in_play' => intval($allies[$index + 12] ?? 0),
+    'is_leader' => boolval($ally->IsLeader()),
+    'upgrades' => $upgrades,
+    'is_upgraded' => count($upgrades) > 0,
+  ];
+}
+
+function unitDetailMapByUnique(array $details): array
+{
+  $map = [];
+  foreach ($details as $detail) {
+    if (!is_array($detail)) continue;
+    $uid = strval($detail['unique_id'] ?? '');
+    if ($uid === '') continue;
+    $map[$uid] = $detail;
+  }
+  return $map;
+}
+
+function allyArenaState(int $playerId): array
+{
+  global $p1Allies, $p2Allies;
+  $allies = ($playerId === 1 ? $p1Allies : $p2Allies);
+  $landAll = [];
+  $landReady = [];
+  $landExhausted = [];
+  $landDetailAll = [];
+  $landDetailReady = [];
+  $landDetailExhausted = [];
+  $spaceAll = [];
+  $spaceReady = [];
+  $spaceExhausted = [];
+  $spaceDetailAll = [];
+  $spaceDetailReady = [];
+  $spaceDetailExhausted = [];
+  for ($i = 0; $i < count($allies); $i += AllyPieces()) {
+    $detail = buildUnitDetail($playerId, $allies, $i);
+    if ($detail === null) continue;
+    $cardId = strval($detail['raw_id'] ?? '');
+    $isReady = boolval($detail['ready'] ?? false);
+    if (strval($detail['arena'] ?? 'LAND') === 'SPACE') {
+      $spaceAll[] = $cardId;
+      $spaceDetailAll[] = $detail;
+      if ($isReady) $spaceReady[] = $cardId;
+      else $spaceExhausted[] = $cardId;
+      if ($isReady) $spaceDetailReady[] = $detail;
+      else $spaceDetailExhausted[] = $detail;
+    } else {
+      $landAll[] = $cardId;
+      $landDetailAll[] = $detail;
+      if ($isReady) $landReady[] = $cardId;
+      else $landExhausted[] = $cardId;
+      if ($isReady) $landDetailReady[] = $detail;
+      else $landDetailExhausted[] = $detail;
+    }
+  }
+  return [
+    'land' => [
+      'all' => $landAll,
+      'ready' => $landReady,
+      'exhausted' => $landExhausted,
+      'details' => [
+        'all' => $landDetailAll,
+        'ready' => $landDetailReady,
+        'exhausted' => $landDetailExhausted,
+      ],
+    ],
+    'space' => [
+      'all' => $spaceAll,
+      'ready' => $spaceReady,
+      'exhausted' => $spaceExhausted,
+      'details' => [
+        'all' => $spaceDetailAll,
+        'ready' => $spaceDetailReady,
+        'exhausted' => $spaceDetailExhausted,
+      ],
+    ],
+  ];
+}
+
 function allyArenaCardIds(int $playerId): array
 {
-  $allies = &GetAllies($playerId);
-  $land = [];
-  $space = [];
-  for ($i = 0; $i < count($allies); $i += AllyPieces()) {
-    $cardId = strval($allies[$i] ?? '');
-    if ($cardId === '') continue;
-    $override = strval($allies[$i + 15] ?? 'NA');
-    $arena = $override !== 'NA' ? $override : strval(CardArenas($cardId));
-    if (strtoupper($arena) === 'SPACE') $space[] = $cardId;
-    else $land[] = $cardId;
+  $state = allyArenaState($playerId);
+  return [
+    'land' => $state['land']['all'],
+    'space' => $state['space']['all'],
+  ];
+}
+
+function zoneCardCount(array $zone, int $pieces): int
+{
+  if ($pieces <= 1) return count($zone);
+  return intdiv(count($zone), $pieces);
+}
+
+function resourceCardStats(int $playerId): array
+{
+  $resourceCards = &GetResourceCards($playerId);
+  $ready = 0;
+  $exhausted = 0;
+  $ids = [];
+  for ($i = 0; $i < count($resourceCards); $i += ResourcePieces()) {
+    $ids[] = strval($resourceCards[$i] ?? '');
+    $isExhausted = strval($resourceCards[$i + 4] ?? '0') === '1';
+    if ($isExhausted) $exhausted++;
+    else $ready++;
   }
-  return ['land' => $land, 'space' => $space];
+  return [
+    'ids' => $ids,
+    'total' => zoneCardCount($resourceCards, ResourcePieces()),
+    'ready' => $ready,
+    'exhausted' => $exhausted,
+  ];
+}
+
+function remainingBaseHealth(int $playerId): int
+{
+  global $playerHealths;
+  $damageTaken = intval($playerHealths[$playerId - 1] ?? 0);
+  $character = &GetPlayerCharacter($playerId);
+  $baseCard = strval($character[0] ?? '');
+  $maxHealth = $baseCard !== '' ? intval(CardHP($baseCard)) : 30;
+  if ($maxHealth <= 0) $maxHealth = 30;
+  $remaining = $maxHealth - $damageTaken;
+  return $remaining > 0 ? $remaining : 0;
 }
 
 function playerPhaseSnapshot(int $playerId): array
 {
-  global $playerHealths;
-  $hand = &GetHand($playerId);
-  $deck = &GetDeck($playerId);
-  $discard = &GetDiscard($playerId);
+  DoGamestateUpdate();
+  global $playerHealths, $p1Hand, $p1Deck, $p1Discard, $p2Hand, $p2Deck, $p2Discard;
+  global $CS_NumTimesUsedTheForce;
+  $hand = ($playerId === 1 ? $p1Hand : $p2Hand);
+  $deck = ($playerId === 1 ? $p1Deck : $p2Deck);
+  $discard = ($playerId === 1 ? $p1Discard : $p2Discard);
   $resources = &GetResources($playerId);
-  $arenas = allyArenaCardIds($playerId);
+  $resourceStats = resourceCardStats($playerId);
+  $forceAvailable = HasTheForce($playerId);
+  $forceTimesUsed = intval(GetClassState($playerId, $CS_NumTimesUsedTheForce));
+  $arenaState = allyArenaState($playerId);
+  $landAll = $arenaState['land']['all'];
+  $spaceAll = $arenaState['space']['all'];
+  $landReady = $arenaState['land']['ready'];
+  $spaceReady = $arenaState['space']['ready'];
+  $landExhausted = $arenaState['land']['exhausted'];
+  $spaceExhausted = $arenaState['space']['exhausted'];
+  $landDetailAll = $arenaState['land']['details']['all'];
+  $spaceDetailAll = $arenaState['space']['details']['all'];
+  $landDetailReady = $arenaState['land']['details']['ready'];
+  $spaceDetailReady = $arenaState['space']['details']['ready'];
+  $landDetailExhausted = $arenaState['land']['details']['exhausted'];
+  $spaceDetailExhausted = $arenaState['space']['details']['exhausted'];
+  $allUnitDetails = array_merge($landDetailAll, $spaceDetailAll);
+  $handCount = zoneCardCount($hand, HandPieces());
+  $deckCount = zoneCardCount($deck, DeckPieces());
+  $discardCount = zoneCardCount($discard, DiscardPieces());
+  $landCount = count($landAll);
+  $spaceCount = count($spaceAll);
+  $activeUnitCount = count($landReady) + count($spaceReady);
 
   return [
     'resources' => [
       'raw' => $resources,
-      'available' => intval($resources[0] ?? 0),
-      'spent' => intval($resources[1] ?? 0),
+      // SWU spendability is represented by ready/exhausted resource cards.
+      // Keep these aligned with what users expect to see in the timeline.
+      'available' => intval($resourceStats['ready']),
+      'spent' => intval($resourceStats['exhausted']),
+      // Preserve engine pool counters for debugging.
+      'pool_available' => intval($resources[0] ?? 0),
+      'pool_spent' => intval($resources[1] ?? 0),
+      'total_cards' => intval($resourceStats['total']),
+      'ready_cards' => intval($resourceStats['ready']),
+      'exhausted_cards' => intval($resourceStats['exhausted']),
+      'spendable' => intval($resourceStats['ready']),
     ],
     'base' => [
-      'health' => intval($playerHealths[$playerId - 1] ?? 0),
+      // Expose user-facing remaining base HP (not internal damage-taken counter).
+      'health' => remainingBaseHealth($playerId),
+      'damage_taken' => intval($playerHealths[$playerId - 1] ?? 0),
+    ],
+    'force' => [
+      'available' => boolval($forceAvailable),
+      'status' => $forceAvailable ? 'available' : 'unavailable',
+      'times_used_this_phase' => $forceTimesUsed,
+    ],
+    'counts' => [
+      'hand' => $handCount,
+      'deck' => $deckCount,
+      'discard' => $discardCount,
+      'land_arena' => $landCount,
+      'space_arena' => $spaceCount,
+      'active_units' => $activeUnitCount,
     ],
     'zones' => [
       'hand' => $hand,
       'deck' => $deck,
       'discard' => $discard,
-      'land_arena' => $arenas['land'],
-      'space_arena' => $arenas['space'],
+      'resources' => $resourceStats['ids'],
+      'land_arena' => $landAll,
+      'space_arena' => $spaceAll,
+      'land_ready' => $landReady,
+      'space_ready' => $spaceReady,
+      'land_exhausted' => $landExhausted,
+      'space_exhausted' => $spaceExhausted,
+    ],
+    'units' => [
+      'active_count' => $activeUnitCount,
+      'details' => $allUnitDetails,
+      'detail_map' => unitDetailMapByUnique($allUnitDetails),
+      'land' => [
+        'all' => $landAll,
+        'ready' => $landReady,
+        'exhausted' => $landExhausted,
+        'details' => [
+          'all' => $landDetailAll,
+          'ready' => $landDetailReady,
+          'exhausted' => $landDetailExhausted,
+        ],
+      ],
+      'space' => [
+        'all' => $spaceAll,
+        'ready' => $spaceReady,
+        'exhausted' => $spaceExhausted,
+        'details' => [
+          'all' => $spaceDetailAll,
+          'ready' => $spaceDetailReady,
+          'exhausted' => $spaceDetailExhausted,
+        ],
+      ],
     ],
   ];
 }
 
 function phaseSnapshot(): array
 {
+  $turn = $GLOBALS['turn'] ?? [];
+  $dqState = $GLOBALS['dqState'] ?? [];
+  $decisionQueue = $GLOBALS['decisionQueue'] ?? [];
   return [
+    'meta' => [
+      'turn_phase' => strval($turn[0] ?? ''),
+      'turn_player' => intval($turn[1] ?? 0),
+      'turn_parameter' => strval($turn[2] ?? ''),
+      'dq_context' => strval($dqState[4] ?? ''),
+      'dq_phase' => strval($decisionQueue[0] ?? ''),
+      'dq_player' => intval($decisionQueue[1] ?? 0),
+    ],
     'player_1' => playerPhaseSnapshot(1),
     'player_2' => playerPhaseSnapshot(2),
   ];
 }
 
+function baseWinnerFromSnapshot(array $snapshot): int
+{
+  $p1Hp = intval($snapshot['player_1']['base']['health'] ?? 0);
+  $p2Hp = intval($snapshot['player_2']['base']['health'] ?? 0);
+  if ($p1Hp <= 0 && $p2Hp <= 0) return 0;
+  if ($p1Hp <= 0) return 2;
+  if ($p2Hp <= 0) return 1;
+  return 0;
+}
+
+function isBaseZeroGameOver(array $snapshot): bool
+{
+  return baseWinnerFromSnapshot($snapshot) !== 0;
+}
+
 function numericDelta(int $before, int $after): int
 {
   return $after - $before;
+}
+
+function normalizePromptText(string $text): string
+{
+  $t = trim($text);
+  if ($t === '' || $t === '-' || $t === '<-') return '';
+  $t = str_replace('_', ' ', $t);
+  $t = preg_replace('/\s+/', ' ', $t) ?? $t;
+  return trim($t);
 }
 
 function deriveEffects(array $before, array $after): array
@@ -175,13 +658,53 @@ function deriveEffects(array $before, array $after): array
   foreach (['player_1', 'player_2'] as $playerKey) {
     $b = $before[$playerKey];
     $a = $after[$playerKey];
+    $p1 = $after['player_1'];
+    $p2 = $after['player_2'];
     $effects[$playerKey] = [
+      // Absolute board snapshot (compat for older UI renderers).
+      'p1_hp' => intval($p1['base']['health']),
+      'p2_hp' => intval($p2['base']['health']),
+      'p1_hand' => intval($p1['counts']['hand']),
+      'p2_hand' => intval($p2['counts']['hand']),
+      'p1_deck' => intval($p1['counts']['deck']),
+      'p2_deck' => intval($p2['counts']['deck']),
+      'p1_discard' => intval($p1['counts']['discard']),
+      'p2_discard' => intval($p2['counts']['discard']),
+      'p1_land' => intval($p1['counts']['land_arena']),
+      'p2_land' => intval($p2['counts']['land_arena']),
+      'p1_space' => intval($p1['counts']['space_arena']),
+      'p2_space' => intval($p2['counts']['space_arena']),
+      'p1_resources_total' => intval($p1['resources']['total_cards']),
+      'p2_resources_total' => intval($p2['resources']['total_cards']),
+      'p1_resources_available' => intval($p1['resources']['available']),
+      'p2_resources_available' => intval($p2['resources']['available']),
+      'p1_resources_spent' => intval($p1['resources']['spent']),
+      'p2_resources_spent' => intval($p2['resources']['spent']),
+      'p1_resources_ready' => intval($p1['resources']['ready_cards']),
+      'p2_resources_ready' => intval($p2['resources']['ready_cards']),
+      'p1_resources_exhausted' => intval($p1['resources']['exhausted_cards']),
+      'p2_resources_exhausted' => intval($p2['resources']['exhausted_cards']),
+      'p1_active_units' => intval($p1['counts']['active_units'] ?? 0),
+      'p2_active_units' => intval($p2['counts']['active_units'] ?? 0),
+      // Legacy "Effects" columns in older UI builds consume *_d fields.
+      // Keep these as live per-player totals (not deltas) so board state persists row-to-row.
+      'hp_d' => intval($a['base']['health']),
+      'res_d' => intval($a['resources']['available']),
+      'spent_d' => intval($a['resources']['spent']),
+      'hand_d' => zoneCardCount($a['zones']['hand'], HandPieces()),
+      'deck_d' => zoneCardCount($a['zones']['deck'], DeckPieces()),
+      'discard_d' => zoneCardCount($a['zones']['discard'], DiscardPieces()),
+      'land_d' => count($a['zones']['land_arena']),
+      'space_d' => count($a['zones']['space_arena']),
       'resources_available_delta' => numericDelta(intval($b['resources']['available']), intval($a['resources']['available'])),
       'resources_spent_delta' => numericDelta(intval($b['resources']['spent']), intval($a['resources']['spent'])),
+      'resource_cards_total_delta' => numericDelta(intval($b['resources']['total_cards']), intval($a['resources']['total_cards'])),
+      'resource_cards_ready_delta' => numericDelta(intval($b['resources']['ready_cards']), intval($a['resources']['ready_cards'])),
+      'resource_cards_exhausted_delta' => numericDelta(intval($b['resources']['exhausted_cards']), intval($a['resources']['exhausted_cards'])),
       'base_health_delta' => numericDelta(intval($b['base']['health']), intval($a['base']['health'])),
-      'hand_count_delta' => numericDelta(count($b['zones']['hand']), count($a['zones']['hand'])),
-      'deck_count_delta' => numericDelta(count($b['zones']['deck']), count($a['zones']['deck'])),
-      'discard_count_delta' => numericDelta(count($b['zones']['discard']), count($a['zones']['discard'])),
+      'hand_count_delta' => numericDelta(zoneCardCount($b['zones']['hand'], HandPieces()), zoneCardCount($a['zones']['hand'], HandPieces())),
+      'deck_count_delta' => numericDelta(zoneCardCount($b['zones']['deck'], DeckPieces()), zoneCardCount($a['zones']['deck'], DeckPieces())),
+      'discard_count_delta' => numericDelta(zoneCardCount($b['zones']['discard'], DiscardPieces()), zoneCardCount($a['zones']['discard'], DiscardPieces())),
       'land_arena_count_delta' => numericDelta(count($b['zones']['land_arena']), count($a['zones']['land_arena'])),
       'space_arena_count_delta' => numericDelta(count($b['zones']['space_arena']), count($a['zones']['space_arena'])),
     ];
@@ -189,30 +712,422 @@ function deriveEffects(array $before, array $after): array
   return $effects;
 }
 
+function displayZoneCardIds(array $zone): array
+{
+  $out = [];
+  foreach ($zone as $rawCardId) {
+    $raw = strval($rawCardId);
+    if ($raw === '') continue;
+    $out[] = displayCardId($raw);
+  }
+  return $out;
+}
+
+function displayUnitDetails(array $details): array
+{
+  $out = [];
+  foreach ($details as $detail) {
+    if (!is_array($detail)) continue;
+    $rawCardId = strval($detail['raw_id'] ?? '');
+    if ($rawCardId === '') continue;
+    $upgradesRaw = array_values(array_map('strval', $detail['upgrades'] ?? []));
+    $out[] = [
+      'id' => displayCardId($rawCardId),
+      'raw_id' => $rawCardId,
+      'uid' => strval($detail['unique_id'] ?? ''),
+      'arena' => strval($detail['arena'] ?? ''),
+      'ready' => boolval($detail['ready'] ?? false),
+      'exhausted' => boolval($detail['exhausted'] ?? false),
+      'damage_taken' => intval($detail['damage_taken'] ?? 0),
+      'current_hp' => intval($detail['current_hp'] ?? 0),
+      'max_hp' => intval($detail['max_hp'] ?? 0),
+      'printed_hp' => intval($detail['printed_hp'] ?? 0),
+      'hp_modifier' => intval($detail['hp_modifier'] ?? 0),
+      'current_power' => intval($detail['current_power'] ?? 0),
+      'printed_power' => intval($detail['printed_power'] ?? 0),
+      'power_modifier' => intval($detail['power_modifier'] ?? 0),
+      'counters' => intval($detail['counters'] ?? 0),
+      'times_attacked' => intval($detail['times_attacked'] ?? 0),
+      'owner' => intval($detail['owner'] ?? 0),
+      'turns_in_play' => intval($detail['turns_in_play'] ?? 0),
+      'is_leader' => boolval($detail['is_leader'] ?? false),
+      'is_upgraded' => boolval($detail['is_upgraded'] ?? false),
+      'upgrades' => displayZoneCardIds($upgradesRaw),
+      'upgrades_raw' => $upgradesRaw,
+    ];
+  }
+  return $out;
+}
+
+function unitDetailsMapFromSnapshot(array $playerSnapshot): array
+{
+  $details = $playerSnapshot['units']['detail_map'] ?? [];
+  if (is_array($details) && count($details) > 0) return $details;
+  return unitDetailMapByUnique($playerSnapshot['units']['details'] ?? []);
+}
+
+function summarizeActionDetails(array $before, array $after): array
+{
+  $details = [
+    'base_damage' => [],
+    'unit_damage' => [],
+    'unit_defeated' => [],
+    'unit_deployed' => [],
+    'unit_upgrade_changes' => [],
+    'unit_stat_changes' => [],
+    'player_state_changes' => [],
+    'follow_up_prompt' => null,
+    'when_defeated_checks' => [],
+  ];
+
+  foreach ([1, 2] as $playerId) {
+    $key = 'player_' . $playerId;
+    $beforePlayer = $before[$key] ?? [];
+    $afterPlayer = $after[$key] ?? [];
+
+    $beforeHand = zoneCardCount($beforePlayer['zones']['hand'] ?? [], HandPieces());
+    $afterHand = zoneCardCount($afterPlayer['zones']['hand'] ?? [], HandPieces());
+    $beforeDeck = zoneCardCount($beforePlayer['zones']['deck'] ?? [], DeckPieces());
+    $afterDeck = zoneCardCount($afterPlayer['zones']['deck'] ?? [], DeckPieces());
+    $beforeDiscard = zoneCardCount($beforePlayer['zones']['discard'] ?? [], DiscardPieces());
+    $afterDiscard = zoneCardCount($afterPlayer['zones']['discard'] ?? [], DiscardPieces());
+    $beforeLand = count($beforePlayer['zones']['land_arena'] ?? []);
+    $afterLand = count($afterPlayer['zones']['land_arena'] ?? []);
+    $beforeSpace = count($beforePlayer['zones']['space_arena'] ?? []);
+    $afterSpace = count($afterPlayer['zones']['space_arena'] ?? []);
+    $beforeReadyUnits = count($beforePlayer['zones']['land_ready'] ?? []) + count($beforePlayer['zones']['space_ready'] ?? []);
+    $afterReadyUnits = count($afterPlayer['zones']['land_ready'] ?? []) + count($afterPlayer['zones']['space_ready'] ?? []);
+    $beforeExhaustedUnits = count($beforePlayer['zones']['land_exhausted'] ?? []) + count($beforePlayer['zones']['space_exhausted'] ?? []);
+    $afterExhaustedUnits = count($afterPlayer['zones']['land_exhausted'] ?? []) + count($afterPlayer['zones']['space_exhausted'] ?? []);
+    $beforeActive = intval($beforePlayer['counts']['active_units'] ?? 0);
+    $afterActive = intval($afterPlayer['counts']['active_units'] ?? 0);
+    $beforeResAvail = intval($beforePlayer['resources']['available'] ?? 0);
+    $afterResAvail = intval($afterPlayer['resources']['available'] ?? 0);
+    $beforeResSpent = intval($beforePlayer['resources']['spent'] ?? 0);
+    $afterResSpent = intval($afterPlayer['resources']['spent'] ?? 0);
+    $beforeResTotal = intval($beforePlayer['resources']['total_cards'] ?? 0);
+    $afterResTotal = intval($afterPlayer['resources']['total_cards'] ?? 0);
+    $beforeResReady = intval($beforePlayer['resources']['ready_cards'] ?? 0);
+    $afterResReady = intval($afterPlayer['resources']['ready_cards'] ?? 0);
+    $beforeResExhausted = intval($beforePlayer['resources']['exhausted_cards'] ?? 0);
+    $afterResExhausted = intval($afterPlayer['resources']['exhausted_cards'] ?? 0);
+    $beforeForce = boolval($beforePlayer['force']['available'] ?? false);
+    $afterForce = boolval($afterPlayer['force']['available'] ?? false);
+
+    $beforeHp = intval($beforePlayer['base']['health'] ?? 0);
+    $afterHp = intval($afterPlayer['base']['health'] ?? 0);
+    $stateChange = [
+      'player' => $playerId,
+      'base_hp_delta' => $afterHp - $beforeHp,
+      'hand_delta' => $afterHand - $beforeHand,
+      'deck_delta' => $afterDeck - $beforeDeck,
+      'discard_delta' => $afterDiscard - $beforeDiscard,
+      'land_units_delta' => $afterLand - $beforeLand,
+      'space_units_delta' => $afterSpace - $beforeSpace,
+      'active_units_delta' => $afterActive - $beforeActive,
+      'ready_units_delta' => $afterReadyUnits - $beforeReadyUnits,
+      'exhausted_units_delta' => $afterExhaustedUnits - $beforeExhaustedUnits,
+      'resources_available_delta' => $afterResAvail - $beforeResAvail,
+      'resources_spent_delta' => $afterResSpent - $beforeResSpent,
+      'resource_cards_total_delta' => $afterResTotal - $beforeResTotal,
+      'resource_cards_ready_delta' => $afterResReady - $beforeResReady,
+      'resource_cards_exhausted_delta' => $afterResExhausted - $beforeResExhausted,
+      'force_before' => $beforeForce,
+      'force_after' => $afterForce,
+    ];
+    $hasStateChange = false;
+    foreach ($stateChange as $k => $v) {
+      if ($k === 'player') continue;
+      if ($k === 'force_before' || $k === 'force_after') continue;
+      if (intval($v) !== 0) {
+        $hasStateChange = true;
+        break;
+      }
+    }
+    if (!$hasStateChange && $beforeForce !== $afterForce) $hasStateChange = true;
+    if ($hasStateChange) $details['player_state_changes'][] = $stateChange;
+
+    if ($afterHp < $beforeHp) {
+      $details['base_damage'][] = [
+        'player' => $playerId,
+        'amount' => $beforeHp - $afterHp,
+        'before_hp' => $beforeHp,
+        'after_hp' => $afterHp,
+      ];
+    }
+
+    $beforeUnits = unitDetailsMapFromSnapshot($beforePlayer);
+    $afterUnits = unitDetailsMapFromSnapshot($afterPlayer);
+
+    foreach ($beforeUnits as $uid => $beforeUnit) {
+      if (!is_array($beforeUnit)) continue;
+      $afterUnit = $afterUnits[$uid] ?? null;
+      $unitDisplay = displayCardId(strval($beforeUnit['raw_id'] ?? ''));
+      if ($afterUnit === null || !is_array($afterUnit)) {
+        $rawId = strval($beforeUnit['raw_id'] ?? '');
+        $details['unit_defeated'][] = [
+          'player' => $playerId,
+          'unit_uid' => strval($uid),
+          'unit_id' => $unitDisplay,
+          'unit_raw_id' => $rawId,
+          'arena' => strval($beforeUnit['arena'] ?? ''),
+          'before_hp' => intval($beforeUnit['current_hp'] ?? 0),
+          'has_when_defeated' => ($rawId !== '' ? boolval(HasWhenDestroyed($rawId)) : false),
+        ];
+        continue;
+      }
+
+      $beforeDamage = intval($beforeUnit['damage_taken'] ?? 0);
+      $afterDamage = intval($afterUnit['damage_taken'] ?? 0);
+      if ($afterDamage > $beforeDamage) {
+        $details['unit_damage'][] = [
+          'player' => $playerId,
+          'unit_uid' => strval($uid),
+          'unit_id' => $unitDisplay,
+          'unit_raw_id' => strval($beforeUnit['raw_id'] ?? ''),
+          'damage' => $afterDamage - $beforeDamage,
+          'before_hp' => intval($beforeUnit['current_hp'] ?? 0),
+          'after_hp' => intval($afterUnit['current_hp'] ?? 0),
+          'upgrades' => displayZoneCardIds(array_values(array_map('strval', $afterUnit['upgrades'] ?? []))),
+        ];
+      }
+
+      $beforeUpgrades = array_values(array_map('strval', $beforeUnit['upgrades'] ?? []));
+      $afterUpgrades = array_values(array_map('strval', $afterUnit['upgrades'] ?? []));
+      sort($beforeUpgrades);
+      sort($afterUpgrades);
+      if ($beforeUpgrades !== $afterUpgrades) {
+        $details['unit_upgrade_changes'][] = [
+          'player' => $playerId,
+          'unit_uid' => strval($uid),
+          'unit_id' => $unitDisplay,
+          'unit_raw_id' => strval($beforeUnit['raw_id'] ?? ''),
+          'before' => displayZoneCardIds($beforeUpgrades),
+          'after' => displayZoneCardIds($afterUpgrades),
+        ];
+      }
+
+      $beforePower = intval($beforeUnit['current_power'] ?? 0);
+      $afterPower = intval($afterUnit['current_power'] ?? 0);
+      $beforeMaxHp = intval($beforeUnit['max_hp'] ?? 0);
+      $afterMaxHp = intval($afterUnit['max_hp'] ?? 0);
+      if ($beforePower !== $afterPower || $beforeMaxHp !== $afterMaxHp) {
+        $details['unit_stat_changes'][] = [
+          'player' => $playerId,
+          'unit_uid' => strval($uid),
+          'unit_id' => $unitDisplay,
+          'unit_raw_id' => strval($beforeUnit['raw_id'] ?? ''),
+          'power' => ['before' => $beforePower, 'after' => $afterPower],
+          'max_hp' => ['before' => $beforeMaxHp, 'after' => $afterMaxHp],
+        ];
+      }
+    }
+
+    foreach ($afterUnits as $uid => $afterUnit) {
+      if (!is_array($afterUnit)) continue;
+      if (isset($beforeUnits[$uid])) continue;
+      $rawCardId = strval($afterUnit['raw_id'] ?? '');
+      $details['unit_deployed'][] = [
+        'player' => $playerId,
+        'unit_uid' => strval($uid),
+        'unit_id' => displayCardId($rawCardId),
+        'unit_raw_id' => $rawCardId,
+        'arena' => strval($afterUnit['arena'] ?? ''),
+        'ready' => boolval($afterUnit['ready'] ?? false),
+        'current_power' => intval($afterUnit['current_power'] ?? 0),
+        'current_hp' => intval($afterUnit['current_hp'] ?? 0),
+        'max_hp' => intval($afterUnit['max_hp'] ?? 0),
+        'upgrades' => displayZoneCardIds(array_values(array_map('strval', $afterUnit['upgrades'] ?? []))),
+      ];
+    }
+  }
+
+  $afterMeta = $after['meta'] ?? [];
+  $afterPhase = strval($afterMeta['turn_phase'] ?? '');
+  $promptPhases = [
+    'YESNO',
+    'CHOOSEMULTIZONE',
+    'MAYCHOOSEMULTIZONE',
+    'CHOOSECARD',
+    'MAYCHOOSECARD',
+    'CHOOSEOPTION',
+    'MAYCHOOSEOPTION',
+    'BUTTONINPUT',
+    'BUTTONINPUTNOPASS',
+  ];
+  if (in_array($afterPhase, $promptPhases, true)) {
+    $turnText = normalizePromptText(strval($afterMeta['turn_parameter'] ?? ''));
+    $ctxText = normalizePromptText(strval($afterMeta['dq_context'] ?? ''));
+    $promptText = $ctxText !== '' ? $ctxText : $turnText;
+    $details['follow_up_prompt'] = [
+      'phase' => $afterPhase,
+      'player' => intval($afterMeta['turn_player'] ?? 0),
+      'text' => $promptText,
+      'raw_turn_parameter' => strval($afterMeta['turn_parameter'] ?? ''),
+      'raw_dq_context' => strval($afterMeta['dq_context'] ?? ''),
+    ];
+  }
+
+  $followPrompt = $details['follow_up_prompt'];
+  foreach ($details['unit_defeated'] as $defeated) {
+    if (!is_array($defeated)) continue;
+    $owner = intval($defeated['player'] ?? 0);
+    $hasWhenDefeated = boolval($defeated['has_when_defeated'] ?? false);
+    $promptForOwner = false;
+    if (is_array($followPrompt)) {
+      $promptForOwner = intval($followPrompt['player'] ?? 0) === $owner;
+    }
+    $details['when_defeated_checks'][] = [
+      'player' => $owner,
+      'unit_id' => strval($defeated['unit_id'] ?? ''),
+      'unit_raw_id' => strval($defeated['unit_raw_id'] ?? ''),
+      'has_when_defeated' => $hasWhenDefeated,
+      'follow_up_prompt_for_owner' => $promptForOwner,
+      'follow_up_prompt_phase' => is_array($followPrompt) ? strval($followPrompt['phase'] ?? '') : '',
+      'follow_up_prompt_text' => is_array($followPrompt) ? strval($followPrompt['text'] ?? '') : '',
+      // "likely_triggered" is conservative: optional prompt exists for defeated unit's owner.
+      'likely_triggered' => $hasWhenDefeated && $promptForOwner,
+    ];
+  }
+
+  return $details;
+}
+
+function boardStateSummary(array $snapshot): array
+{
+  $out = [];
+  foreach (['player_1', 'player_2'] as $playerKey) {
+    $p = $snapshot[$playerKey] ?? [];
+    $zones = $p['zones'] ?? [];
+    $resources = $p['resources'] ?? [];
+    $counts = $p['counts'] ?? [];
+    $units = $p['units'] ?? [];
+    $out[$playerKey] = [
+      'base_hp' => intval($p['base']['health'] ?? 0),
+      'damage_taken' => intval($p['base']['damage_taken'] ?? 0),
+      'force' => [
+        'available' => boolval($p['force']['available'] ?? false),
+        'status' => strval($p['force']['status'] ?? 'unavailable'),
+        'times_used_this_phase' => intval($p['force']['times_used_this_phase'] ?? 0),
+      ],
+      'hand_count' => intval($counts['hand'] ?? 0),
+      'hand_cards' => displayZoneCardIds($zones['hand'] ?? []),
+      'resources' => [
+        'available' => intval($resources['available'] ?? 0),
+        'spent' => intval($resources['spent'] ?? 0),
+        'total' => intval($resources['total_cards'] ?? 0),
+        'ready' => intval($resources['ready_cards'] ?? 0),
+        'exhausted' => intval($resources['exhausted_cards'] ?? 0),
+      ],
+      'units' => [
+        'active_count' => intval($units['active_count'] ?? 0),
+        'land' => displayZoneCardIds($zones['land_arena'] ?? []),
+        'space' => displayZoneCardIds($zones['space_arena'] ?? []),
+        'land_ready' => displayZoneCardIds($zones['land_ready'] ?? []),
+        'space_ready' => displayZoneCardIds($zones['space_ready'] ?? []),
+        'land_exhausted' => displayZoneCardIds($zones['land_exhausted'] ?? []),
+        'space_exhausted' => displayZoneCardIds($zones['space_exhausted'] ?? []),
+        'details' => displayUnitDetails($units['details'] ?? []),
+        'land_details' => [
+          'all' => displayUnitDetails($units['land']['details']['all'] ?? []),
+          'ready' => displayUnitDetails($units['land']['details']['ready'] ?? []),
+          'exhausted' => displayUnitDetails($units['land']['details']['exhausted'] ?? []),
+        ],
+        'space_details' => [
+          'all' => displayUnitDetails($units['space']['details']['all'] ?? []),
+          'ready' => displayUnitDetails($units['space']['details']['ready'] ?? []),
+          'exhausted' => displayUnitDetails($units['space']['details']['exhausted'] ?? []),
+        ],
+      ],
+      'deck_count' => intval($counts['deck'] ?? 0),
+      'discard_count' => intval($counts['discard'] ?? 0),
+    ];
+  }
+  return $out;
+}
+
 $events = [];
 $illegalActions = 0;
+$forcedPasses = 0;
+$repeatChosenCount = 0;
+$lastChosenStableKey = '';
+$terminatedReason = '';
+$noLegalActionStreak = 0;
 
-for ($step = 1; $step <= $maxActions && !IsGameOver(); ++$step) {
-  $playerId = intval($GLOBALS['currentPlayer'] ?? 1);
+for ($step = 1; $step <= $actionCap; ++$step) {
+  $GLOBALS['__runner_checkpoint'] = 'loop_step_' . $step;
+  $preStepSnapshot = phaseSnapshot();
+  if (isBaseZeroGameOver($preStepSnapshot)) break;
+
   $turnSnapshot = $GLOBALS['turn'] ?? ['-', '0'];
   $phase = strval($turnSnapshot[0] ?? '-');
   $round = intval($GLOBALS['currentRound'] ?? 1);
+  $turnPlayer = intval($turnSnapshot[1] ?? 0);
+  $priorityPlayer = intval($GLOBALS['currentPlayer'] ?? 0);
+  $fallbackPlayer = $turnPlayer > 0 ? $turnPlayer : 1;
+  $playerId = $priorityPlayer > 0 ? $priorityPlayer : $fallbackPlayer;
 
   $phaseBegin = phaseSnapshot();
   $legalActions = getLegalActions($playerId);
+  if (count($legalActions) === 0 && $playerId !== $fallbackPlayer) {
+    $legalActions = getLegalActions($fallbackPlayer);
+    if (count($legalActions) > 0) $playerId = $fallbackPlayer;
+  }
+
+  if (count($legalActions) === 0) {
+    $noLegalActionStreak++;
+    if ($noLegalActionStreak >= 3) {
+      $terminatedReason = 'no_legal_actions';
+      break;
+    }
+    continue;
+  }
+  $noLegalActionStreak = 0;
+
   $chosen = chooseAction($legalActions, $seed, $step, $playerId, $round, $phase, $policy);
   if ($chosen === null) break;
 
-  $cardRef = resolveCardReference($playerId, $chosen);
-  $cardCost = $cardRef !== '' ? intval(CardCost($cardRef)) : null;
-  $cardType = $cardRef !== '' ? strval(DefinedCardType($cardRef)) : '';
+  // Prevent pathological loops where one always-legal action is repeatedly chosen.
+  $chosenStableKey = json_encode($chosen, JSON_UNESCAPED_SLASHES);
+  if ($chosenStableKey === $lastChosenStableKey) $repeatChosenCount++;
+  else $repeatChosenCount = 1;
+  $lastChosenStableKey = $chosenStableKey;
+
+  if ($repeatChosenCount >= 6) {
+    $passAction = findPassAction($legalActions);
+    if ($passAction !== null) {
+      $chosen = $passAction;
+      $forcedPasses++;
+      $repeatChosenCount = 0;
+      $lastChosenStableKey = json_encode($chosen, JSON_UNESCAPED_SLASHES);
+    }
+  }
+
+  $cardRefRaw = resolveCardReferenceRaw($playerId, $chosen);
+  $cardRef = displayCardId($cardRefRaw);
+  $cardCost = $cardRefRaw !== '' ? intval(CardCost($cardRefRaw)) : null;
+  $cardType = $cardRefRaw !== '' ? strval(DefinedCardType($cardRefRaw)) : '';
 
   $GLOBALS['gameName'] = $gameName;
+  $GLOBALS['__runner_last_action'] = [
+    'step' => $step,
+    'round' => $round,
+    'phase' => $phase,
+    'player' => $playerId,
+    'action' => $chosen,
+  ];
   $result = applyAction($playerId, $chosen);
   $ok = boolval($result['ok'] ?? false);
   if (!$ok) $illegalActions++;
 
   $phaseEnd = phaseSnapshot();
+
+  $effects = deriveEffects($phaseBegin, $phaseEnd);
+  $actionDetails = summarizeActionDetails($phaseBegin, $phaseEnd);
+  $openingHandP1 = zoneCardCount($openingState['player_1']['zones']['hand'] ?? [], HandPieces());
+  $openingHandP2 = zoneCardCount($openingState['player_2']['zones']['hand'] ?? [], HandPieces());
+  $effects['player_1']['opening_hand_count'] = $openingHandP1;
+  $effects['player_2']['opening_hand_count'] = $openingHandP2;
 
   $event = [
     'step' => $step,
@@ -220,8 +1135,10 @@ for ($step = 1; $step <= $maxActions && !IsGameOver(); ++$step) {
     'phase' => $phase,
     'player' => $playerId,
     'action' => $chosen,
+    'is_decision' => isDecisionLikeAction($chosen),
     'card' => [
       'id' => $cardRef,
+      'raw_id' => $cardRefRaw,
       'cost' => $cardCost,
       'type' => $cardType,
     ],
@@ -231,9 +1148,14 @@ for ($step = 1; $step <= $maxActions && !IsGameOver(); ++$step) {
     'message' => strval($result['message'] ?? ''),
     'next_player' => intval($GLOBALS['currentPlayer'] ?? $playerId),
     'next_phase' => strval(($GLOBALS['turn'][0] ?? '-')),
+    'initiative_player' => intval($GLOBALS['initiativePlayer'] ?? 0),
+    'initiative_taken' => intval($GLOBALS['initiativeTaken'] ?? 0),
     'phase_state_begin' => $phaseBegin,
     'phase_state_end' => $phaseEnd,
-    'effects' => deriveEffects($phaseBegin, $phaseEnd),
+    'board_state_begin' => boardStateSummary($phaseBegin),
+    'board_state_end' => boardStateSummary($phaseEnd),
+    'action_details' => $actionDetails,
+    'effects' => $effects,
   ];
   $events[] = $event;
 
@@ -255,8 +1177,19 @@ for ($step = 1; $step <= $maxActions && !IsGameOver(); ++$step) {
   ]);
 }
 
-$winner = intval($GLOBALS['winner'] ?? 0);
+if ($terminatedReason === '' && count($events) >= $actionCap) {
+  $terminatedReason = 'action_cap_reached';
+}
+$GLOBALS['__runner_checkpoint'] = 'building_response';
+
+$finalState = phaseSnapshot();
+$winner = baseWinnerFromSnapshot($finalState);
+$gameOver = $winner === 1 || $winner === 2;
+if (!$gameOver && boolval(IsGameOver()) && $terminatedReason === '') {
+  $terminatedReason = 'engine_game_over_without_base_zero';
+}
 $turns = intval($GLOBALS['currentRound'] ?? 0);
+$roundPages = groupedEventsByRound($events);
 
 $response = [
   'match_id' => $matchID,
@@ -269,10 +1202,58 @@ $response = [
   'stats' => [
     'events' => count($events),
     'illegal_actions' => $illegalActions,
-    'game_over' => IsGameOver(),
+    'game_over' => $gameOver,
     'policy' => $policy,
+    'forced_passes' => $forcedPasses,
+    'max_actions_requested' => $maxActions,
+    'action_cap' => $actionCap,
+    'terminated_reason' => $terminatedReason,
   ],
+  'setup' => [
+    'starting_round' => intval($GLOBALS['currentRound'] ?? 1),
+    'initiative_player' => intval($GLOBALS['initiativePlayer'] ?? 0),
+    'initiative_taken' => intval($GLOBALS['initiativeTaken'] ?? 0),
+  ],
+  'opening' => [
+    'player_1' => [
+      'hand_count' => zoneCardCount($openingState['player_1']['zones']['hand'] ?? [], HandPieces()),
+      'deck_count' => zoneCardCount($openingState['player_1']['zones']['deck'] ?? [], DeckPieces()),
+      'resource_cards' => intval($openingState['player_1']['resources']['total_cards'] ?? 0),
+    ],
+    'player_2' => [
+      'hand_count' => zoneCardCount($openingState['player_2']['zones']['hand'] ?? [], HandPieces()),
+      'deck_count' => zoneCardCount($openingState['player_2']['zones']['deck'] ?? [], DeckPieces()),
+      'resource_cards' => intval($openingState['player_2']['resources']['total_cards'] ?? 0),
+    ],
+  ],
+  'final_state' => $finalState,
   'events' => $events,
+  'round_pages' => $roundPages,
 ];
 
-echo json_encode($response, JSON_UNESCAPED_SLASHES);
+$json = json_encode($response, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+if ($json === false) {
+  $fallback = [
+    'match_id' => $matchID,
+    'seed' => $seed,
+    'winner' => $winner,
+    'turns' => intval($GLOBALS['currentRound'] ?? 0),
+    'stats' => [
+      'events' => count($events),
+      'illegal_actions' => $illegalActions,
+      'game_over' => $gameOver,
+      'policy' => $policy,
+      'forced_passes' => $forcedPasses,
+      'max_actions_requested' => $maxActions,
+      'action_cap' => $actionCap,
+      'terminated_reason' => 'json_encode_failed',
+      'json_error' => json_last_error_msg(),
+    ],
+    'events' => [],
+    'round_pages' => [],
+  ];
+  $json = json_encode($fallback, JSON_UNESCAPED_SLASHES);
+}
+$GLOBALS['__runner_finished'] = true;
+$GLOBALS['__runner_checkpoint'] = 'finished';
+echo $json;

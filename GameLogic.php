@@ -2341,6 +2341,10 @@ function DecisionQueueStaticEffect($phase, $player, $parameter, $lastResult)
       return 0;
     case "QUICKREMATCH":
       if($lastResult == "YES") {
+        if (defined('HEADLESS_SIM') && HEADLESS_SIM) {
+          WriteLog("Quick rematch requested in headless mode; skipping redirect.");
+          return 0;
+        }
         $currentTime = round(microtime(true) * 1000);
         SetCachePiece($gameName, 2, $currentTime);
         SetCachePiece($gameName, 3, $currentTime);

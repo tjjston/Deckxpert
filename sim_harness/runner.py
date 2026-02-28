@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import os
 import random
+import shutil
 import subprocess
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -59,6 +62,19 @@ def _simulate_locally(seed: int, match_id: int, deck_a: str, deck_b: str) -> Mat
     return MatchResult(match_id, seed, winner, turns, outcome, str(log_path))
 
 
+def resolve_php_bin() -> str | None:
+    candidates: list[str] = []
+    php_bin_env = (os.environ.get("PHP_BIN") or "").strip()
+    if php_bin_env:
+        candidates.append(php_bin_env)
+    candidates.extend(["php", "php8.4", "php8.3", "php8.2", "php8.1", "php8.0", "php7.4"])
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return None
+
+
 def run_match(
     deck_a: str,
     deck_b: str,
@@ -69,24 +85,43 @@ def run_match(
     """Run one headless match.
 
     If php_script is provided and executable, this calls:
-    php <php_script> --seed <seed> --deck-a <deck_a> --deck-b <deck_b> --match-id <id>
+    php <php_script> --seed <seed> --deck-a-b64 <deck_a_b64> --deck-b-b64 <deck_b_b64> --match-id <id>
     and expects JSON on stdout. Otherwise it uses a deterministic local simulation fallback.
     """
     if php_script:
+        php_bin = resolve_php_bin()
+        if not php_bin:
+            raise RuntimeError(
+                "PHP executable not found. Install php-cli or set PHP_BIN to your php binary path."
+            )
+        if not Path(php_script).exists():
+            raise RuntimeError(f"PHP match runner script not found: {php_script}")
+        deck_a_b64 = base64.b64encode(deck_a.encode("utf-8")).decode("ascii")
+        deck_b_b64 = base64.b64encode(deck_b.encode("utf-8")).decode("ascii")
         cmd = [
-            "php",
+            php_bin,
             php_script,
             "--seed",
             str(seed),
-            "--deck-a",
-            deck_a,
-            "--deck-b",
-            deck_b,
+            "--deck-a-b64",
+            deck_a_b64,
+            "--deck-b-b64",
+            deck_b_b64,
             "--match-id",
             str(match_id),
         ]
-        proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        payload = json.loads(proc.stdout)
+        env = dict(os.environ)
+        env["XDEBUG_MODE"] = "off"
+        proc = subprocess.run(cmd, check=False, capture_output=True, text=True, env=env)
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        if proc.returncode != 0:
+            concise = _extract_runner_error(stdout, stderr)
+            raise RuntimeError(
+                "PHP match runner failed "
+                f"(exit={proc.returncode}). {concise}"
+            )
+        payload = _decode_php_json(stdout, stderr)
         return MatchResult(
             match_id=payload.get("match_id", match_id),
             seed=payload["seed"],
@@ -97,6 +132,60 @@ def run_match(
         )
 
     return _simulate_locally(seed, match_id, deck_a, deck_b)
+
+
+def _decode_php_json(stdout: str, stderr: str) -> dict[str, Any]:
+    text = (stdout or "").strip()
+    if not text:
+        raise ValueError(
+            "PHP match runner returned empty stdout. "
+            f"stderr={stderr[:500] or '<empty>'}"
+        )
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            return payload
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch not in "{[":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text[i:])
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            continue
+
+    raise ValueError(
+        "PHP match runner did not return valid JSON. "
+        f"stdout={text[:500]} stderr={stderr[:500] or '<empty>'}"
+    )
+
+
+def _extract_runner_error(stdout: str, stderr: str) -> str:
+    for text in (stdout, stderr):
+        if not text:
+            continue
+        try:
+            payload = _decode_php_json(text, "")
+            if isinstance(payload, dict):
+                err = str(payload.get("error", "")).strip()
+                msg = str(payload.get("message", "")).strip()
+                if err and msg:
+                    return f"{err}: {msg}"
+                if msg:
+                    return msg
+                if err:
+                    return err
+        except Exception:
+            pass
+    return (
+        f"stderr={stderr[:500] or '<empty>'} "
+        f"stdout={stdout[:500] or '<empty>'}"
+    )
 
 
 def _run_match_job(job: tuple[int, str, str, int, str | None]) -> MatchResult:

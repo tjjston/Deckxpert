@@ -401,9 +401,18 @@ function PlayerWon($playerID, $concededMatch = false)
   global $winner, $turn, $gameName, $p1id, $p2id, $p1uid, $p2uid, $conceded, $currentRound;
   global $p1DeckLink, $p2DeckLink, $inGameStatus, $GameStatus_Over, $firstPlayer, $p1deckbuilderID, $p2deckbuilderID;
   global $p1SWUStatsToken, $p2SWUStatsToken;
+  $isHeadlessSim = defined('HEADLESS_SIM') && HEADLESS_SIM;
 
   if($turn[0] == "OVER" && !$concededMatch) return;
-  include_once "./MenuFiles/ParseGamefile.php";
+  if ($isHeadlessSim) {
+    $winner = $playerID;
+    $inGameStatus = $GameStatus_Over;
+    $turn[0] = "OVER";
+    return;
+  }
+  if (!$isHeadlessSim) {
+    include_once "./MenuFiles/ParseGamefile.php";
+  }
 
   $winner = $playerID;
   $machGameNumber = GetCachePiece($gameName, 24);
@@ -423,12 +432,13 @@ function PlayerWon($playerID, $concededMatch = false)
   SetCachePiece($gameName, 14, 6);//$MGS_GameOverStatsLogged
   if(GetCachePiece($gameName, 14) == 7) return;//$MGS_StatsLoggedIrreversible
 
-  try {
-    if (!AreStatsDisabled(1) && !AreStatsDisabled(2) && !IsDevEnvironment()) {
-      SendSWUStatsResults();
+  if (!$isHeadlessSim) {
+    try {
+      if (!AreStatsDisabled(1) && !AreStatsDisabled(2) && !IsDevEnvironment()) {
+        SendSWUStatsResults();
+      }
+    } catch (Exception $e) {
     }
-  } catch (Exception $e) {
-
   }
 
   if(!$conceded || $currentRound>= 3) {

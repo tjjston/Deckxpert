@@ -1124,10 +1124,11 @@ function SpecificCardLogic($player, $parameter, $lastResult)
       break;
     case "HAN_SOLO_LEADER_JTL":
       $ally = new Ally($lastResult, $player);
-      $attackerCost = CardCost($ally->CardID());
-      $attackerCostIsOdd = $attackerCost % 2 == 1;
+      $attackerCostRaw = CardCost($ally->CardID());
+      $attackerCost = is_numeric($attackerCostRaw) ? intval($attackerCostRaw) : -1;
+      $attackerCostIsOdd = $attackerCost >= 0 && (($attackerCost % 2) == 1);
       $odds = intval($dqVars[0]);
-      $oddsIsOdd = $odds % 2 == 1;
+      $oddsIsOdd = ($odds % 2) == 1;
       if($attackerCostIsOdd && $oddsIsOdd && $attackerCost != $odds) {
         AddCurrentTurnEffect("0616724418", $player);
       }

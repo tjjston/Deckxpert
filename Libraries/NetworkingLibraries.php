@@ -2675,6 +2675,9 @@ function ProcessAttackTarget()
 
 function WriteGamestate()
 {
+  if (defined('HEADLESS_SIM') && HEADLESS_SIM) {
+    return;
+  }
   global $gameName, $playerHealths;
   global $p1Hand, $p1Deck, $p1CharEquip, $p1Resources, $p1Arsenal, $p1Items, $p1Auras, $p1Discard, $p1Pitch, $p1Banish;
   global $p1ClassState, $p1CharacterEffects, $p1Soul, $p1CardStats, $p1TurnStats, $p1Allies, $p1Permanents, $p1Settings;

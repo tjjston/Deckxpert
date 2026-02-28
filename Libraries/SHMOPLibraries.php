@@ -43,6 +43,14 @@ if ($useRedis) {
   $redis->connect($redisHost, $redisPort);
 }
 
+function NormalizedShmopKey($name)
+{
+  if (is_int($name)) return $name;
+  if (is_string($name) && ctype_digit($name)) return intval($name);
+  $hashed = intval(sprintf('%u', crc32(strval($name))));
+  return $hashed === 0 ? 1 : $hashed;
+}
+
 function WriteCache($name, $data)
 {
   global $useRedis, $redis;
@@ -55,11 +63,12 @@ function WriteCache($name, $data)
     $redis->set($name, $serData);
   }
   else {
-    $id = shmop_open($name, "c", 0644, 256);
+    $key = NormalizedShmopKey($name);
+    $id = shmop_open($key, "c", 0644, 256);
     if($id == false) {
-      exit;
-     } else {
-        $rv = shmop_write($id, $serData, 0);
+      return;
+    } else {
+      $rv = shmop_write($id, $serData, 0);
     }
   }
 }
@@ -87,7 +96,8 @@ function ReadCache($name)
 
 function ShmopReadCache($name)
 {
-  @$id = shmop_open($name, "a", 0, 0);
+  $key = NormalizedShmopKey($name);
+  @$id = shmop_open($key, "a", 0, 0);
   if(empty($id) || $id == false)
   {
     return "";
@@ -123,7 +133,8 @@ function DeleteCache($name)
     $redis->del($name . "GS");
   }
   //Always try to delete shmop
-  $id=shmop_open($name, "w", 0644, 256);
+  $key = NormalizedShmopKey($name);
+  $id=shmop_open($key, "w", 0644, 256);
   if($id)
   {
     shmop_delete($id);

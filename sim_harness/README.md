@@ -55,7 +55,10 @@ The UI supports:
 - creating simulations with seed/workers/opponent-set settings,
 - reviewing simulation history and analysis (overall, by-tier, best/worst matchup, per-opponent stats).
 - running a single match and following turn-by-turn events (action legality, card/cost/type, and per-step effects).
-- selecting single-match action policy: `random_non_pass` (default), `random_legal`, or `first_non_pass`.
+- selecting single-match action policy: `random_legal` (default), `random_non_pass`, or `first_non_pass`.
+- viewing single-match timelines paginated by round, with optional decision-prompt filtering.
+- single-match runs default to full-game simulation (until game over, with an internal safety cap).
+- SWUDB-style set IDs are converted to engine UUID card IDs before simulation; unknown set IDs are rejected with an explicit error.
 
 ### Storage
 
