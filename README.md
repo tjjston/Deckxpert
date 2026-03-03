@@ -1,151 +1,109 @@
-# SWUOnline - Petranaki
-Star Wars Unlimited Sim
+# SWUOnline (Petranaki) in Deckxpert
 
-## Contact info
-If you need to contact us or would like to get involved in the dev work, please reach out in our [Discord server](https://discord.gg/AN5GEXSu)!
+This codebase was originally built as a virtual **Star Wars: Unlimited** web app (Arena UI + online turns).
 
-## Dev Quickstart
+In this repository, it is also used as a **rules engine** for headless simulation:
+- the same PHP game logic that drives Arena is executed without the browser UI,
+- simulations are run via the headless engine and surfaced in the `sim_harness` dashboard.
 
-We have two options for setting up a development environment: a docker-based method that is fully automatic and supports live debug, or a walkthrough for how to set up the environment manually on your local machine.
+## What This Repo Is Used For Now
 
-### Dev Environment Option 1: Docker environment with live debugging
-We provide a docker environment for local run with built-in xdebug support for live debugging, which can be installed and started in two commands if you already have docker set up. A preconfigured setup is provided for Visual Studio Code (it would be very simple to set up other tools as well).
+1. **Original Arena app**
+- Web gameplay flow and online turn system.
+- Useful for manual parity checks against rules behavior.
 
-#### Step 0. Install docker
-If you are on Windows, please follow the instructions for installing Docker Desktop on Windows (either WSL or Hyper-V backend should work but we have only tested with WSL): https://docs.docker.com/desktop/install/windows-install/
+2. **Headless rules execution**
+- Engine interface exposed via `Engine/HeadlessEngine.php` and `EngineCLI.php`.
+- Supports initialize game, legal actions, action apply, and state/observation retrieval.
 
-#### Step 1. Starting / stopping the service
+3. **Simulation harness**
+- Deterministic single-match and multi-match runs.
+- Deck upload/management from SWUDB JSON.
+- Match timeline, legality checks, keyword/mechanic audits, and validation matrix.
 
-Run the following commands to start / stop the service
+## Current Simulation Functionality
+
+The simulation UI (`sim_harness.web`) currently supports:
+- Deck pools: `candidate`, `meta`, `starter`.
+- Deck minimum selection: `30` or `50` cards (for sim setup).
+- Single match run with policy and seed.
+- Turn-by-turn timeline with:
+  - action legality,
+  - card metadata (`id`, `cost`, `type`),
+  - initiative status,
+  - resources (ready/exhausted/total),
+  - board state (hands, units, upgrades, captives, force status).
+- Round pagination and decision-prompt grouping/substeps.
+- Timeline by round/phase summary.
+- Keyword Trigger Audit.
+- Validation Matrix (mechanic trigger tracking, trigger instances, illegal move tracking).
+- Card art hover + modal preview in match timeline.
+- Simulation batch runs and result analysis tiles.
+
+## Architecture Overview
+
+- Core rules logic: top-level PHP engine files (`CoreLogic.php`, `GameLogic.php`, `CardLogic.php`, `AllyAbilities.php`, etc.).
+- Headless wrapper: `Engine/HeadlessEngine.php`.
+- Headless CLI bridge: `EngineCLI.php`.
+- Match runner for sim events: `sim_harness/php_match_runner.php`.
+- Python dashboard/API for deck + sim operations: `sim_harness/web.py`.
+
+## Quick Start (Docker)
+
+### 1. Start services
 ```bash
 bash petranaki.sh start
-bash petranaki.sh stop
-bash petranaki.sh restart
 ```
 
-#### Step 2. Accessing the application
+### 2. Open UIs
+- Arena app: `http://localhost:8080/Arena/MainMenu.php`
+- Sim dashboard: `http://localhost:8765`
 
-Open this address in your browser: http://localhost:8080/Arena/MainMenu.php
+### 3. Stop services
+```bash
+bash petranaki.sh stop
+```
 
-The simulation dashboard is also available after startup at: http://localhost:8765
+## Quick Start (Sim Harness Only)
 
-If you want to play a game against yourself, open multiple windows / tabs and connect.
+If you are running locally without Docker:
 
-#### Step 3. Run debugger in VSCode (optional)
-Xdebug is already running in the service, you can use these steps to do live debugging with breakpoints in Visual Studio Code:
+1. Ensure Python dependencies are available for `sim_harness`.
+2. Ensure PHP CLI is installed and reachable (`php` in `PATH`) or set `PHP_BIN`.
+3. Start the dashboard:
+```bash
+python -m sim_harness.web --host 127.0.0.1 --port 8765
+```
+4. Open: `http://127.0.0.1:8765`
 
-1. Install an extension that supports PHP debugging, such as https://marketplace.visualstudio.com/items?itemName=DEVSENSE.phptools-vscode
-2. We have a preconfigured [launch.json](.vscode/launch.json) to enable the debug action. In the vscode debug window (Ctrl + Shift + D), select the configuration `SWUOnline: Listen for Xdebug` and hit the Run button.
-3. You are now connected for debugging, add a breakpoint and try it out :)
+## Typical Sim Workflow
 
-Additionally, any tool that can connect to xdebug remotely should work as well.
+1. Upload one or more SWUDB deck JSON files.
+2. Run **Single Match** to inspect timeline/rules behavior.
+3. Review:
+- legality,
+- resources and board transitions,
+- keyword audit,
+- validation matrix trigger instances.
+4. Run **Simulation** (N games/opponent set) for aggregate performance.
+5. Inspect simulation analysis and matchup breakdown.
 
-### Dev Environment Option 2: Manual Environment Setup
+## Important Notes
 
-We have a Google Doc with instructions for setting up the environment. Some steps may be missing or require extra detail, if you find any issues please contact us via the Discord so we can improve the document.
+- Set-style card IDs (for example `TWI_###`) are mapped to engine UUID IDs by the match runner.
+- Unknown set IDs are rejected with explicit errors.
+- Single-match mode runs to completion (winner/base-zero condition) with an internal safety cap.
+- If PHP is missing, match execution cannot run.
 
-https://docs.google.com/document/d/10u3qGpxr1ddvwobq8__lVZfYCgqtanZShHEaYljiA1M/edit?usp=sharing
+## Key Paths
 
----
+- [Engine/HeadlessEngine.php](Engine/HeadlessEngine.php)
+- [EngineCLI.php](EngineCLI.php)
+- [sim_harness/php_match_runner.php](sim_harness/php_match_runner.php)
+- [sim_harness/web.py](sim_harness/web.py)
+- [sim_harness/README.md](sim_harness/README.md)
+- [README-Server-Setup.md](README-Server-Setup.md)
 
-### CI/CD Configuration Guide
+## Contact
 
-This guide explains how to set up CI/CD, including deploying with GitHub, securing webhooks, and configuring environment variables.
-
-
-#### 1. Configure a Webhook
-- Generate a secret key to secure the webhook:
-  ```bash
-  openssl rand -hex 32
-  ```
-  Save this secret for later use.
-
-- In your GitHub repository, go to **Settings > Webhooks** and create a new webhook with the following settings:
-  - **Payload URL**: `https://petranaki.net/Arena/Webhook.php`
-  - **Content Type**: `application/json`
-  - **Secret**: `<webhook-secret>` (use the secret generated earlier)
-  - **SSL Verification**: Enabled
-  - **Events**: Select "Just the push event" to trigger the webhook on push events.
-
-#### 2. Configure `.htaccess`
-To secure your project and set environment variables:
-- Navigate to your project directory: `/var/www/html/petranaki`
-- Create or edit an `.htaccess` file with the following content:
-  ```apache
-  RedirectMatch 404 /\.git
-  SetEnv MYSQL_SERVER_NAME localhost
-  SetEnv MYSQL_SERVER_USER_NAME root
-  SetEnv MYSQL_ROOT_PASSWORD <mysql-password> (password for the custom user)
-  SetEnv WEBHOOK_SECRET <webhook-secret>
-  SetEnv PATREON_CLIENT_ID <patreon-client-id>
-  SetEnv PATREON_CLIENT_SECRET <patreon-client-secret>
-
-  RewriteEngine On
-
-  # Redirect from / to /Arena/MainMenu.php
-  RewriteRule ^$ /Arena/MainMenu.php [L,R=301]
-
-  # Redirect from /Arena to /Arena/MainMenu.php
-  RewriteRule ^Arena/?$ /Arena/MainMenu.php [L,R=301]
-  ```
-
-This configuration ensures that the `.git` folder is inaccessible and adds environment variables for your project.
-
-#### 3. Sync the Project to GitHub
-If your project is not yet synced to GitHub, follow these steps:
-
-- Initialize the project as a Git repository:
-  ```bash
-  git init
-  ```
-
-- Fetch the project from GitHub:
-  ```bash
-  git fetch https://github.com/SWU-Petranaki/SWUOnline.git main
-  ```
-
-- Reset the project to the latest version:
-  ```bash
-  git reset --hard FETCH_HEAD
-  ```
-  **Note**: Files listed in `.gitignore` will remain unaffected. Back up important files before running this command to avoid accidental data loss.
-
-- Pull the latest changes from GitHub:
-  ```bash
-  git pull https://github.com/SWU-Petranaki/SWUOnline.git main
-  ```
-
-- Grant permissions to the `daemon` user:
-  ```bash
-  sudo chown -R daemon:daemon /opt/lampp/htdocs/petranaki/Arena
-  ```
-
-- Add the project directory to the safe directory list:
-  ```bash
-  sudo git config --system --add safe.directory /opt/lampp/htdocs/petranaki/Arena
-  ```
-
-- Test the setup:
-  ```bash
-  sudo -u daemon git pull https://github.com/SWU-Petranaki/SWUOnline.git main
-  ```
-
-#### 5. Grant Permissions to the `daemon` User
-The `Webhook.php` script will execute using the `daemon` user, so it must have permissions to run `git pull`.
-
-- Edit the sudoers file:
-  ```bash
-  sudo visudo
-  ```
-
-- Add the following line to grant limited permissions:
-  ```text
-  daemon ALL=(ALL) NOPASSWD: /usr/bin/git
-  ```
-
-This ensures that the daemon user can authenticate with GitHub when the webhook triggers a git pull operation.
-
-#### Final Steps
-Your project is now configured for CI/CD. Any commit pushed to the `main` branch will trigger the webhook, which executes a `git pull` on the server to update the project files automatically.
-
-### Bump CI/CD #4
+Discord: https://discord.gg/AN5GEXSu

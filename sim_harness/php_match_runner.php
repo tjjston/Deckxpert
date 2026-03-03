@@ -183,6 +183,29 @@ function deterministicChoiceIndex(array $actions, int $seed, int $step, int $pla
   return intval($sample % $count);
 }
 
+function normalizedPromptContext(): string
+{
+  $dqState = $GLOBALS['dqState'] ?? [];
+  $turn = $GLOBALS['turn'] ?? [];
+  $ctx = strval($dqState[4] ?? '');
+  if ($ctx === '' || $ctx === '-' || $ctx === '<-') {
+    $ctx = strval($turn[2] ?? '');
+  }
+  $ctx = strtolower(str_replace('_', ' ', trim($ctx)));
+  $ctx = preg_replace('/\s+/', ' ', $ctx) ?? $ctx;
+  return trim($ctx);
+}
+
+function shouldPreferNonPassForPrompt(string $phase): bool
+{
+  if ($phase !== 'MAYCHOOSEMULTIZONE' && $phase !== 'CHOOSEMULTIZONE') return false;
+  $ctx = normalizedPromptContext();
+  if ($ctx === '') return false;
+  // Exploit is an additional-cost selection. Passing here can make a "play" action no-op
+  // when the card only becomes payable after selecting units to exploit.
+  return str_contains($ctx, 'exploit');
+}
+
 function chooseAction(array $legalActions, int $seed, int $step, int $playerId, int $round, string $phase, string $policy): ?array
 {
   if (count($legalActions) === 0) return null;
@@ -207,10 +230,37 @@ function chooseAction(array $legalActions, int $seed, int $step, int $playerId, 
   // Keep random_legal behavior everywhere else.
   if ($policy === 'random_legal' && $phase === 'M' && count($nonPass) > 0) {
     $candidates = $nonPass;
+  } else if ($policy === 'random_legal' && count($nonPass) > 0 && shouldPreferNonPassForPrompt($phase)) {
+    $candidates = $nonPass;
   }
 
   $choiceIndex = deterministicChoiceIndex($candidates, $seed, $step, $playerId, $round, $phase, $policy);
   return $candidates[$choiceIndex] ?? $candidates[0];
+}
+
+function snapshotFingerprint(array $snapshot): string
+{
+  $json = json_encode($snapshot, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+  if ($json === false) return hash('sha256', serialize($snapshot));
+  return hash('sha256', $json);
+}
+
+function gameplayNoOpCandidate(array $action): bool
+{
+  $type = strval($action['type'] ?? '');
+  if ($type === '') return false;
+  if ($type === 'play_character') return true;
+  if ($type === 'arsenal') return true;
+  if (str_starts_with($type, 'play_')) return true;
+  if (str_starts_with($type, 'activate_')) return true;
+  return false;
+}
+
+function isNoOpResolvedAction(array $before, array $after, array $action, bool $ok): bool
+{
+  if (!$ok) return false;
+  if (!gameplayNoOpCandidate($action)) return false;
+  return snapshotFingerprint($before) === snapshotFingerprint($after);
 }
 
 function legalActionTypeSummary(array $legalActions): array
@@ -230,6 +280,26 @@ function findPassAction(array $legalActions): ?array
     if (strval($action['type'] ?? '') === 'pass') return $action;
   }
   return null;
+}
+
+function resolveActingPlayerAndLegalActions(int $turnPlayer, int $priorityPlayer): array
+{
+  $candidates = [];
+  if ($turnPlayer > 0) $candidates[] = $turnPlayer;
+  if ($priorityPlayer > 0 && !in_array($priorityPlayer, $candidates, true)) $candidates[] = $priorityPlayer;
+  foreach ([1, 2] as $pid) {
+    if (!in_array($pid, $candidates, true)) $candidates[] = $pid;
+  }
+
+  foreach ($candidates as $pid) {
+    $actions = getLegalActions($pid);
+    if (count($actions) > 0) {
+      return ['player_id' => $pid, 'actions' => $actions];
+    }
+  }
+
+  $fallback = intval($candidates[0] ?? 1);
+  return ['player_id' => $fallback, 'actions' => []];
 }
 
 function isDecisionLikeAction(array $action): bool
@@ -285,6 +355,7 @@ function resolveCardReferenceRaw(int $playerId, array $action): string
 {
   $type = strval($action['type'] ?? '');
   $cardID = $action['cardID'] ?? 0;
+  $cardIDStr = strval($cardID);
 
   if ($type === 'play_hand') {
     $hand = &GetHand($playerId);
@@ -298,6 +369,10 @@ function resolveCardReferenceRaw(int $playerId, array $action): string
     $arsenal = &GetArsenal($playerId);
     return strval($arsenal[intval($cardID)] ?? '');
   }
+  if ($type === 'play_resource') {
+    $resources = &GetResourceCards($playerId);
+    return strval($resources[intval($cardID)] ?? '');
+  }
   if ($type === 'play_item' || $type === 'activate_item') {
     $items = &GetItems($playerId);
     return strval($items[intval($cardID)] ?? '');
@@ -309,6 +384,9 @@ function resolveCardReferenceRaw(int $playerId, array $action): string
   if ($type === 'play_aura' || $type === 'activate_aura') {
     $auras = &GetAuras($playerId);
     return strval($auras[intval($cardID)] ?? '');
+  }
+  if ($cardIDStr !== '' && str_contains($cardIDStr, '-')) {
+    return strval(GetMZCard($playerId, $cardIDStr));
   }
   if ($type === 'choose_zone') {
     $targetRef = strval($cardID);
@@ -333,6 +411,39 @@ function displayCardId(string $rawCardId): string
   return $rawCardId;
 }
 
+function cardKeywordFlags(string $rawCardId, int $playerId): array
+{
+  if ($rawCardId === '') return [];
+  $keywords = [
+    'Smuggle',
+    'Raid',
+    'Grit',
+    'Restore',
+    'Bounty',
+    'Overwhelm',
+    'Saboteur',
+    'Shielded',
+    'Sentinel',
+    'Ambush',
+    'Coordinate',
+    'Exploit',
+    'Piloting',
+    'Hidden',
+    'Plot',
+  ];
+  $flags = [];
+  foreach ($keywords as $keyword) {
+    $hasKeyword = false;
+    try {
+      $hasKeyword = boolval(HasKeyword($rawCardId, $keyword, $playerId, -1));
+    } catch (Throwable $t) {
+      $hasKeyword = false;
+    }
+    $flags[$keyword] = $hasKeyword;
+  }
+  return $flags;
+}
+
 function buildUnitDetail(int $playerId, array $allies, int $index): ?array
 {
   $rawCardId = strval($allies[$index] ?? '');
@@ -353,6 +464,7 @@ function buildUnitDetail(int $playerId, array $allies, int $index): ?array
   $damageTaken = intval($ally->Damage());
   $currentHp = intval($ally->Health());
   $upgrades = array_values(array_map('strval', $ally->GetUpgrades()));
+  $captives = array_values(array_map('strval', $ally->GetCaptives()));
 
   return [
     'raw_id' => $rawCardId,
@@ -372,9 +484,12 @@ function buildUnitDetail(int $playerId, array $allies, int $index): ?array
     'times_attacked' => intval($allies[$index + 10] ?? 0),
     'owner' => intval($allies[$index + 11] ?? $playerId),
     'turns_in_play' => intval($allies[$index + 12] ?? 0),
+    'from' => strval($allies[$index + 16] ?? ''),
     'is_leader' => boolval($ally->IsLeader()),
     'upgrades' => $upgrades,
     'is_upgraded' => count($upgrades) > 0,
+    'captives' => $captives,
+    'has_captive' => count($captives) > 0,
   ];
 }
 
@@ -731,6 +846,7 @@ function displayUnitDetails(array $details): array
     $rawCardId = strval($detail['raw_id'] ?? '');
     if ($rawCardId === '') continue;
     $upgradesRaw = array_values(array_map('strval', $detail['upgrades'] ?? []));
+    $captivesRaw = array_values(array_map('strval', $detail['captives'] ?? []));
     $out[] = [
       'id' => displayCardId($rawCardId),
       'raw_id' => $rawCardId,
@@ -750,10 +866,14 @@ function displayUnitDetails(array $details): array
       'times_attacked' => intval($detail['times_attacked'] ?? 0),
       'owner' => intval($detail['owner'] ?? 0),
       'turns_in_play' => intval($detail['turns_in_play'] ?? 0),
+      'from' => strval($detail['from'] ?? ''),
       'is_leader' => boolval($detail['is_leader'] ?? false),
       'is_upgraded' => boolval($detail['is_upgraded'] ?? false),
       'upgrades' => displayZoneCardIds($upgradesRaw),
       'upgrades_raw' => $upgradesRaw,
+      'has_captive' => boolval($detail['has_captive'] ?? false),
+      'captives' => displayZoneCardIds($captivesRaw),
+      'captives_raw' => $captivesRaw,
     ];
   }
   return $out;
@@ -766,18 +886,52 @@ function unitDetailsMapFromSnapshot(array $playerSnapshot): array
   return unitDetailMapByUnique($playerSnapshot['units']['details'] ?? []);
 }
 
-function summarizeActionDetails(array $before, array $after): array
+function cardCounts(array $rawCardIds): array
+{
+  $counts = [];
+  foreach ($rawCardIds as $rawCardId) {
+    $raw = strval($rawCardId);
+    if ($raw === '') continue;
+    $counts[$raw] = intval($counts[$raw] ?? 0) + 1;
+  }
+  return $counts;
+}
+
+function addedCardsBetweenZones(array $beforeCardIds, array $afterCardIds): array
+{
+  $beforeCounts = cardCounts($beforeCardIds);
+  $afterCounts = cardCounts($afterCardIds);
+  $added = [];
+  foreach ($afterCounts as $rawCardId => $afterCount) {
+    $beforeCount = intval($beforeCounts[$rawCardId] ?? 0);
+    $extra = $afterCount - $beforeCount;
+    for ($i = 0; $i < $extra; ++$i) {
+      $added[] = $rawCardId;
+    }
+  }
+  return $added;
+}
+
+function summarizeActionDetails(array $before, array $after, array $action = [], int $actingPlayer = 0, string $actionCardRaw = ''): array
 {
   $details = [
     'base_damage' => [],
     'unit_damage' => [],
     'unit_defeated' => [],
     'unit_deployed' => [],
+    'unit_ready_state_changes' => [],
     'unit_upgrade_changes' => [],
+    'unit_capture_changes' => [],
     'unit_stat_changes' => [],
+    'experience_tokens_given' => [],
+    'token_units_created' => [],
+    'resourced_cards' => [],
     'player_state_changes' => [],
     'follow_up_prompt' => null,
     'when_defeated_checks' => [],
+    'exploit_resolution' => null,
+    'leader_action_triggers' => [],
+    'epic_action_triggers' => [],
   ];
 
   foreach ([1, 2] as $playerId) {
@@ -811,6 +965,8 @@ function summarizeActionDetails(array $before, array $after): array
     $afterResReady = intval($afterPlayer['resources']['ready_cards'] ?? 0);
     $beforeResExhausted = intval($beforePlayer['resources']['exhausted_cards'] ?? 0);
     $afterResExhausted = intval($afterPlayer['resources']['exhausted_cards'] ?? 0);
+    $beforeResCards = array_values(array_map('strval', $beforePlayer['zones']['resources'] ?? []));
+    $afterResCards = array_values(array_map('strval', $afterPlayer['zones']['resources'] ?? []));
     $beforeForce = boolval($beforePlayer['force']['available'] ?? false);
     $afterForce = boolval($afterPlayer['force']['available'] ?? false);
 
@@ -846,6 +1002,17 @@ function summarizeActionDetails(array $before, array $after): array
     }
     if (!$hasStateChange && $beforeForce !== $afterForce) $hasStateChange = true;
     if ($hasStateChange) $details['player_state_changes'][] = $stateChange;
+
+    $newResourceCards = addedCardsBetweenZones($beforeResCards, $afterResCards);
+    foreach ($newResourceCards as $rawCardId) {
+      $raw = strval($rawCardId);
+      if ($raw === '') continue;
+      $details['resourced_cards'][] = [
+        'player' => $playerId,
+        'card_raw_id' => $raw,
+        'card_id' => displayCardId($raw),
+      ];
+    }
 
     if ($afterHp < $beforeHp) {
       $details['base_damage'][] = [
@@ -892,11 +1059,15 @@ function summarizeActionDetails(array $before, array $after): array
         ];
       }
 
-      $beforeUpgrades = array_values(array_map('strval', $beforeUnit['upgrades'] ?? []));
-      $afterUpgrades = array_values(array_map('strval', $afterUnit['upgrades'] ?? []));
+      $beforeUpgradesRaw = array_values(array_map('strval', $beforeUnit['upgrades'] ?? []));
+      $afterUpgradesRaw = array_values(array_map('strval', $afterUnit['upgrades'] ?? []));
+      $beforeUpgrades = $beforeUpgradesRaw;
+      $afterUpgrades = $afterUpgradesRaw;
       sort($beforeUpgrades);
       sort($afterUpgrades);
       if ($beforeUpgrades !== $afterUpgrades) {
+        $addedUpgradesRaw = addedCardsBetweenZones($beforeUpgradesRaw, $afterUpgradesRaw);
+        $removedUpgradesRaw = addedCardsBetweenZones($afterUpgradesRaw, $beforeUpgradesRaw);
         $details['unit_upgrade_changes'][] = [
           'player' => $playerId,
           'unit_uid' => strval($uid),
@@ -904,6 +1075,58 @@ function summarizeActionDetails(array $before, array $after): array
           'unit_raw_id' => strval($beforeUnit['raw_id'] ?? ''),
           'before' => displayZoneCardIds($beforeUpgrades),
           'after' => displayZoneCardIds($afterUpgrades),
+          'added' => displayZoneCardIds($addedUpgradesRaw),
+          'removed' => displayZoneCardIds($removedUpgradesRaw),
+        ];
+        $experienceAddedRaw = array_values(array_filter(
+          $addedUpgradesRaw,
+          static fn(string $raw): bool => $raw === '2007868442'
+        ));
+        if (count($experienceAddedRaw) > 0) {
+          $details['experience_tokens_given'][] = [
+            'player' => $playerId,
+            'unit_uid' => strval($uid),
+            'unit_id' => $unitDisplay,
+            'unit_raw_id' => strval($beforeUnit['raw_id'] ?? ''),
+            'amount' => count($experienceAddedRaw),
+            'token_ids' => displayZoneCardIds($experienceAddedRaw),
+          ];
+        }
+      }
+
+      $beforeReadyState = boolval($beforeUnit['ready'] ?? false);
+      $afterReadyState = boolval($afterUnit['ready'] ?? false);
+      if ($beforeReadyState !== $afterReadyState) {
+        $details['unit_ready_state_changes'][] = [
+          'player' => $playerId,
+          'unit_uid' => strval($uid),
+          'unit_id' => $unitDisplay,
+          'unit_raw_id' => strval($beforeUnit['raw_id'] ?? ''),
+          'arena' => strval($afterUnit['arena'] ?? $beforeUnit['arena'] ?? ''),
+          'before_ready' => $beforeReadyState,
+          'after_ready' => $afterReadyState,
+          'before_exhausted' => !$beforeReadyState,
+          'after_exhausted' => !$afterReadyState,
+          'change' => $afterReadyState ? 'readied' : 'exhausted',
+        ];
+      }
+
+      $beforeCaptives = array_values(array_map('strval', $beforeUnit['captives'] ?? []));
+      $afterCaptives = array_values(array_map('strval', $afterUnit['captives'] ?? []));
+      sort($beforeCaptives);
+      sort($afterCaptives);
+      if ($beforeCaptives !== $afterCaptives) {
+        $capturedAdded = array_values(array_diff($afterCaptives, $beforeCaptives));
+        $capturedReleased = array_values(array_diff($beforeCaptives, $afterCaptives));
+        $details['unit_capture_changes'][] = [
+          'player' => $playerId,
+          'unit_uid' => strval($uid),
+          'unit_id' => $unitDisplay,
+          'unit_raw_id' => strval($beforeUnit['raw_id'] ?? ''),
+          'before' => displayZoneCardIds($beforeCaptives),
+          'after' => displayZoneCardIds($afterCaptives),
+          'captured_added' => displayZoneCardIds($capturedAdded),
+          'captured_released' => displayZoneCardIds($capturedReleased),
         ];
       }
 
@@ -933,12 +1156,23 @@ function summarizeActionDetails(array $before, array $after): array
         'unit_id' => displayCardId($rawCardId),
         'unit_raw_id' => $rawCardId,
         'arena' => strval($afterUnit['arena'] ?? ''),
+        'from' => strval($afterUnit['from'] ?? ''),
+        'is_leader' => boolval($afterUnit['is_leader'] ?? false),
         'ready' => boolval($afterUnit['ready'] ?? false),
         'current_power' => intval($afterUnit['current_power'] ?? 0),
         'current_hp' => intval($afterUnit['current_hp'] ?? 0),
         'max_hp' => intval($afterUnit['max_hp'] ?? 0),
         'upgrades' => displayZoneCardIds(array_values(array_map('strval', $afterUnit['upgrades'] ?? []))),
       ];
+      if ($rawCardId !== '' && IsToken($rawCardId)) {
+        $details['token_units_created'][] = [
+          'player' => $playerId,
+          'unit_uid' => strval($uid),
+          'unit_id' => displayCardId($rawCardId),
+          'unit_raw_id' => $rawCardId,
+          'arena' => strval($afterUnit['arena'] ?? ''),
+        ];
+      }
     }
   }
 
@@ -988,6 +1222,81 @@ function summarizeActionDetails(array $before, array $after): array
       // "likely_triggered" is conservative: optional prompt exists for defeated unit's owner.
       'likely_triggered' => $hasWhenDefeated && $promptForOwner,
     ];
+  }
+
+  $actionType = strval($action['type'] ?? '');
+  $actionButton = strval($action['buttonInput'] ?? '');
+  $actionMode = intval($action['mode'] ?? 0);
+  $actionCardIsLeader = ($actionCardRaw !== '' ? boolval(CardIDIsLeader($actionCardRaw)) : false);
+  $actionCardId = ($actionCardRaw !== '' ? displayCardId($actionCardRaw) : '');
+  $beforeMeta = $before['meta'] ?? [];
+  $beforePromptText = trim(
+    normalizePromptText(strval($beforeMeta['dq_context'] ?? '')) . ' ' .
+    normalizePromptText(strval($beforeMeta['turn_parameter'] ?? ''))
+  );
+  $beforePhase = strval($beforeMeta['turn_phase'] ?? '');
+  $beforePromptLower = strtolower($beforePromptText);
+  if (($beforePhase === 'MAYCHOOSEMULTIZONE' || $beforePhase === 'CHOOSEMULTIZONE') && str_contains($beforePromptLower, 'exploit')) {
+    $selectedCount = 0;
+    if ($actionType === 'choose_zone' && strval($action['cardID'] ?? '') !== '') {
+      $selectedCount = 1;
+    } elseif ($actionType === 'multi_choose') {
+      $selectedCount = max(0, intval($action['chkCount'] ?? 0));
+    }
+    $details['exploit_resolution'] = [
+      'player' => $actingPlayer,
+      'selected_count' => $selectedCount,
+      'action_type' => $actionType,
+      'prompt' => $beforePromptText,
+    ];
+  }
+
+  $pendingLeaderActionTrigger = null;
+  if ($actionType === 'play_character' && $actionCardIsLeader) {
+    $pendingLeaderActionTrigger = [
+      'player' => $actingPlayer,
+      'leader_id' => $actionCardId,
+      'leader_raw_id' => $actionCardRaw,
+      'action_type' => $actionType,
+      'mode' => $actionMode,
+      'button_input' => $actionButton,
+      'before_prompt' => $beforePromptText,
+      'trigger' => 'leader_action_selected',
+    ];
+  }
+
+  $epicTriggeredThisAction = false;
+  foreach ($details['unit_deployed'] as $deployed) {
+    if (!is_array($deployed)) continue;
+    if (!boolval($deployed['is_leader'] ?? false)) continue;
+    $deployFrom = strtoupper(strval($deployed['from'] ?? ''));
+    if ($deployFrom === 'EPICACTION') {
+      $epicTriggeredThisAction = true;
+      $details['epic_action_triggers'][] = [
+        'player' => intval($deployed['player'] ?? 0),
+        'leader_id' => strval($deployed['unit_id'] ?? ''),
+        'leader_raw_id' => strval($deployed['unit_raw_id'] ?? ''),
+        'action_type' => $actionType,
+        'mode' => $actionMode,
+        'button_input' => $actionButton,
+        'trigger' => 'leader_epic_action_deploy',
+      ];
+      continue;
+    }
+    $details['leader_action_triggers'][] = [
+      'player' => intval($deployed['player'] ?? 0),
+      'leader_id' => strval($deployed['unit_id'] ?? ''),
+      'leader_raw_id' => strval($deployed['unit_raw_id'] ?? ''),
+      'action_type' => $actionType,
+      'mode' => $actionMode,
+      'button_input' => $actionButton,
+      'trigger' => 'leader_deployed',
+      'deploy_from' => $deployFrom,
+    ];
+  }
+
+  if (is_array($pendingLeaderActionTrigger) && !$epicTriggeredThisAction) {
+    $details['leader_action_triggers'][] = $pendingLeaderActionTrigger;
   }
 
   return $details;
@@ -1049,10 +1358,13 @@ function boardStateSummary(array $snapshot): array
 $events = [];
 $illegalActions = 0;
 $forcedPasses = 0;
+$noOpFilteredActions = 0;
+$noOpActionRetries = 0;
 $repeatChosenCount = 0;
 $lastChosenStableKey = '';
 $terminatedReason = '';
 $noLegalActionStreak = 0;
+$noOpBlacklistByState = [];
 
 for ($step = 1; $step <= $actionCap; ++$step) {
   $GLOBALS['__runner_checkpoint'] = 'loop_step_' . $step;
@@ -1064,15 +1376,11 @@ for ($step = 1; $step <= $actionCap; ++$step) {
   $round = intval($GLOBALS['currentRound'] ?? 1);
   $turnPlayer = intval($turnSnapshot[1] ?? 0);
   $priorityPlayer = intval($GLOBALS['currentPlayer'] ?? 0);
-  $fallbackPlayer = $turnPlayer > 0 ? $turnPlayer : 1;
-  $playerId = $priorityPlayer > 0 ? $priorityPlayer : $fallbackPlayer;
+  $resolvedActing = resolveActingPlayerAndLegalActions($turnPlayer, $priorityPlayer);
+  $playerId = intval($resolvedActing['player_id'] ?? ($turnPlayer > 0 ? $turnPlayer : 1));
+  $legalActions = is_array($resolvedActing['actions'] ?? null) ? $resolvedActing['actions'] : [];
 
   $phaseBegin = phaseSnapshot();
-  $legalActions = getLegalActions($playerId);
-  if (count($legalActions) === 0 && $playerId !== $fallbackPlayer) {
-    $legalActions = getLegalActions($fallbackPlayer);
-    if (count($legalActions) > 0) $playerId = $fallbackPlayer;
-  }
 
   if (count($legalActions) === 0) {
     $noLegalActionStreak++;
@@ -1084,46 +1392,150 @@ for ($step = 1; $step <= $actionCap; ++$step) {
   }
   $noLegalActionStreak = 0;
 
-  $chosen = chooseAction($legalActions, $seed, $step, $playerId, $round, $phase, $policy);
-  if ($chosen === null) break;
+  $stateFingerprint = snapshotFingerprint($phaseBegin);
+  if (!isset($noOpBlacklistByState[$stateFingerprint])) {
+    $noOpBlacklistByState[$stateFingerprint] = [];
+  }
+  $attemptedNoOpKeys = [];
+  $chosen = null;
+  $chosenCardRefRawBefore = '';
+  $result = ['ok' => false, 'message' => ''];
+  $ok = false;
+  $phaseEnd = $phaseBegin;
 
-  // Prevent pathological loops where one always-legal action is repeatedly chosen.
-  $chosenStableKey = json_encode($chosen, JSON_UNESCAPED_SLASHES);
-  if ($chosenStableKey === $lastChosenStableKey) $repeatChosenCount++;
-  else $repeatChosenCount = 1;
-  $lastChosenStableKey = $chosenStableKey;
+  while (true) {
+    $candidateActions = array_values(array_filter(
+      $legalActions,
+      static function (array $action) use ($stateFingerprint, $noOpBlacklistByState, $attemptedNoOpKeys): bool {
+        $key = json_encode($action, JSON_UNESCAPED_SLASHES);
+        if (isset($noOpBlacklistByState[$stateFingerprint][$key])) return false;
+        if (isset($attemptedNoOpKeys[$key])) return false;
+        return true;
+      }
+    ));
+    if (count($candidateActions) === 0) {
+      $candidateActions = array_values(array_filter(
+        $legalActions,
+        static function (array $action) use ($attemptedNoOpKeys): bool {
+          $key = json_encode($action, JSON_UNESCAPED_SLASHES);
+          return !isset($attemptedNoOpKeys[$key]);
+        }
+      ));
+    }
+    if (count($candidateActions) === 0) {
+      $candidateActions = $legalActions;
+    }
 
-  if ($repeatChosenCount >= 6) {
-    $passAction = findPassAction($legalActions);
-    if ($passAction !== null) {
-      $chosen = $passAction;
-      $forcedPasses++;
-      $repeatChosenCount = 0;
-      $lastChosenStableKey = json_encode($chosen, JSON_UNESCAPED_SLASHES);
+    $chosen = chooseAction($candidateActions, $seed, $step, $playerId, $round, $phase, $policy);
+    if ($chosen === null) break;
+
+    // Prevent pathological loops where one always-legal action is repeatedly chosen.
+    $chosenStableKey = json_encode($chosen, JSON_UNESCAPED_SLASHES);
+    if ($chosenStableKey === $lastChosenStableKey) $repeatChosenCount++;
+    else $repeatChosenCount = 1;
+    $lastChosenStableKey = $chosenStableKey;
+
+    if ($repeatChosenCount >= 6) {
+      $passAction = findPassAction($candidateActions);
+      if ($passAction !== null) {
+        $chosen = $passAction;
+        $forcedPasses++;
+        $repeatChosenCount = 0;
+        $chosenStableKey = json_encode($chosen, JSON_UNESCAPED_SLASHES);
+        $lastChosenStableKey = $chosenStableKey;
+      }
+    }
+
+    // Resolve card reference before applyAction mutates zones (hand/resources/board).
+    $chosenCardRefRawBefore = resolveCardReferenceRaw($playerId, $chosen);
+
+    $GLOBALS['gameName'] = $gameName;
+    $GLOBALS['__runner_last_action'] = [
+      'step' => $step,
+      'round' => $round,
+      'phase' => $phase,
+      'player' => $playerId,
+      'action' => $chosen,
+    ];
+    $result = applyAction($playerId, $chosen);
+    $ok = boolval($result['ok'] ?? false);
+    $phaseEnd = phaseSnapshot();
+
+    // Illegal-at-apply can happen when hidden/stateful legality differs between selection time
+    // and apply-time validation. Retry another candidate in the same step so illegal probes do
+    // not consume an action slot in the timeline when alternatives exist.
+    if (!$ok) {
+      $noOpBlacklistByState[$stateFingerprint][$chosenStableKey] = true;
+      $attemptedNoOpKeys[$chosenStableKey] = true;
+
+      $turnSnapshotNow = $GLOBALS['turn'] ?? ['-', '0'];
+      $turnPlayerNow = intval($turnSnapshotNow[1] ?? 0);
+      $priorityPlayerNow = intval($GLOBALS['currentPlayer'] ?? 0);
+      $resolvedNow = resolveActingPlayerAndLegalActions($turnPlayerNow, $priorityPlayerNow);
+      $preferredPlayerNow = intval($resolvedNow['player_id'] ?? $playerId);
+      $legalActions = is_array($resolvedNow['actions'] ?? null) ? $resolvedNow['actions'] : [];
+
+      if ($preferredPlayerNow !== $playerId && count($legalActions) > 0) {
+        $playerId = $preferredPlayerNow;
+        // Action candidates are player-specific; reset attempted probes when actor changes.
+        $attemptedNoOpKeys = [];
+        continue;
+      }
+
+      if (count($legalActions) > 0) {
+        $hasUnattemptedAlternative = false;
+        foreach ($legalActions as $candidate) {
+          $candidateKey = json_encode($candidate, JSON_UNESCAPED_SLASHES);
+          if (!isset($attemptedNoOpKeys[$candidateKey])) {
+            $hasUnattemptedAlternative = true;
+            break;
+          }
+        }
+        if ($hasUnattemptedAlternative) {
+          continue;
+        }
+      }
+
+      // Turn-boundary safety: if the active player changed under us, retry using the other player
+      // in the same step before recording a hard illegal.
+      $otherPlayerId = $playerId === 1 ? 2 : 1;
+      $otherLegalActions = getLegalActions($otherPlayerId);
+      if (count($otherLegalActions) > 0) {
+        $playerId = $otherPlayerId;
+        $legalActions = $otherLegalActions;
+        // attemptedNoOpKeys are per-player action probes for this state; switching players should reset.
+        $attemptedNoOpKeys = [];
+        continue;
+      }
+
+      // No recoverable alternative found; keep the illegal event for diagnosis.
+      break;
+    }
+
+    if (!isNoOpResolvedAction($phaseBegin, $phaseEnd, $chosen, $ok)) {
+      break;
+    }
+
+    $noOpFilteredActions++;
+    $noOpActionRetries++;
+    $noOpBlacklistByState[$stateFingerprint][$chosenStableKey] = true;
+    $attemptedNoOpKeys[$chosenStableKey] = true;
+    if (count($attemptedNoOpKeys) >= count($legalActions)) {
+      $result['message'] = trim(strval($result['message'] ?? '') . ' no_op_action_reverted');
+      break;
     }
   }
 
-  $cardRefRaw = resolveCardReferenceRaw($playerId, $chosen);
+  if ($chosen === null) break;
+  if (!$ok) $illegalActions++;
+
+  $cardRefRaw = $chosenCardRefRawBefore;
   $cardRef = displayCardId($cardRefRaw);
   $cardCost = $cardRefRaw !== '' ? intval(CardCost($cardRefRaw)) : null;
   $cardType = $cardRefRaw !== '' ? strval(DefinedCardType($cardRefRaw)) : '';
 
-  $GLOBALS['gameName'] = $gameName;
-  $GLOBALS['__runner_last_action'] = [
-    'step' => $step,
-    'round' => $round,
-    'phase' => $phase,
-    'player' => $playerId,
-    'action' => $chosen,
-  ];
-  $result = applyAction($playerId, $chosen);
-  $ok = boolval($result['ok'] ?? false);
-  if (!$ok) $illegalActions++;
-
-  $phaseEnd = phaseSnapshot();
-
   $effects = deriveEffects($phaseBegin, $phaseEnd);
-  $actionDetails = summarizeActionDetails($phaseBegin, $phaseEnd);
+  $actionDetails = summarizeActionDetails($phaseBegin, $phaseEnd, $chosen, $playerId, $cardRefRaw);
   $openingHandP1 = zoneCardCount($openingState['player_1']['zones']['hand'] ?? [], HandPieces());
   $openingHandP2 = zoneCardCount($openingState['player_2']['zones']['hand'] ?? [], HandPieces());
   $effects['player_1']['opening_hand_count'] = $openingHandP1;
@@ -1141,6 +1553,7 @@ for ($step = 1; $step <= $actionCap; ++$step) {
       'raw_id' => $cardRefRaw,
       'cost' => $cardCost,
       'type' => $cardType,
+      'keywords' => ($cardRefRaw !== '' ? cardKeywordFlags($cardRefRaw, $playerId) : []),
     ],
     'legal_action_count' => count($legalActions),
     'legal_actions_by_type' => legalActionTypeSummary($legalActions),
@@ -1190,6 +1603,15 @@ if (!$gameOver && boolval(IsGameOver()) && $terminatedReason === '') {
 }
 $turns = intval($GLOBALS['currentRound'] ?? 0);
 $roundPages = groupedEventsByRound($events);
+$leaderActionTriggerCount = 0;
+$epicActionTriggerCount = 0;
+foreach ($events as $evt) {
+  if (!is_array($evt)) continue;
+  $d = $evt['action_details'] ?? null;
+  if (!is_array($d)) continue;
+  $leaderActionTriggerCount += is_array($d['leader_action_triggers'] ?? null) ? count($d['leader_action_triggers']) : 0;
+  $epicActionTriggerCount += is_array($d['epic_action_triggers'] ?? null) ? count($d['epic_action_triggers']) : 0;
+}
 
 $response = [
   'match_id' => $matchID,
@@ -1205,6 +1627,10 @@ $response = [
     'game_over' => $gameOver,
     'policy' => $policy,
     'forced_passes' => $forcedPasses,
+    'no_op_filtered_actions' => $noOpFilteredActions,
+    'no_op_action_retries' => $noOpActionRetries,
+    'leader_action_triggers' => $leaderActionTriggerCount,
+    'epic_action_triggers' => $epicActionTriggerCount,
     'max_actions_requested' => $maxActions,
     'action_cap' => $actionCap,
     'terminated_reason' => $terminatedReason,
@@ -1244,6 +1670,8 @@ if ($json === false) {
       'game_over' => $gameOver,
       'policy' => $policy,
       'forced_passes' => $forcedPasses,
+      'no_op_filtered_actions' => $noOpFilteredActions,
+      'no_op_action_retries' => $noOpActionRetries,
       'max_actions_requested' => $maxActions,
       'action_cap' => $actionCap,
       'terminated_reason' => 'json_encode_failed',

@@ -1,29 +1,97 @@
 # sim_harness
 
-Python harness for deterministic, parallel match execution.
+`sim_harness` is the Python + PHP simulation layer on top of the SWU engine.
 
-## API
+It uses the same core rules logic as Arena, but runs matches headlessly for:
+- deterministic single-match inspection,
+- batch simulation analysis,
+- rules/mechanic validation from real match logs.
 
-- `run_match(...)`
-- `run_benchmark(deck_pairs, n_games, seed_policy)`
-- `optimize_deck(...)`
+## What It Does
 
-## Reproducibility
+1. **Deck management**
+- Upload SWUDB JSON decks.
+- Store decks in local pools: `candidate`, `meta`, `starter`.
 
-`run_benchmark` uses `seed_policy["global_seed"]` and derives deterministic per-match seeds with SHA-256.
+2. **Single match execution**
+- Run one match with a selected policy and seed.
+- Capture per-step events with legal/illegal result and board snapshots.
+- Show timeline paged by round with optional decision prompts.
 
-## Optional PHP runner
+3. **Batch simulation**
+- Run candidate deck vs selected opponent pool.
+- Track aggregate win rates and matchup summaries.
 
-Set `seed_policy["php_script"] = "sim_harness/php_match_runner.php"` to route each match to a PHP subprocess.
+4. **Validation tooling**
+- Keyword Trigger Audit.
+- Validation Matrix with trigger instances and illegal move tracking.
 
-## Outputs
+## Core Files
 
-- JSONL benchmark output at `sim_harness/artifacts/benchmark.jsonl`.
-- Optional parquet output when pandas + parquet backend are installed.
+- Runner: [php_match_runner.php](php_match_runner.php)
+- Web dashboard/API: [web.py](web.py)
+- CLI deck/sim management: [cli.py](cli.py)
+- Persistent deck store: `sim_harness/data/decks.json`
+- Persistent sim history: `sim_harness/data/simulations.json`
 
-## Simulation Manager CLI
+## Run the Dashboard
 
-Use the CLI to upload SWUDB decks, maintain `meta`/`starter` pools, and run candidate simulations.
+```bash
+python -m sim_harness.web --host 127.0.0.1 --port 8765
+```
+
+Open:
+- `http://127.0.0.1:8765`
+
+Requirements:
+- Python 3
+- PHP CLI available in `PATH` (or set `PHP_BIN`)
+
+If PHP is missing, match execution will fail with a PHP binary error.
+
+## Single Match Behavior
+
+Single-match run path:
+1. Decks are normalized and ID-mapped.
+2. Headless game initializes from the engine.
+3. Legal actions are requested from `Engine/LegalActions.php`.
+4. Action is selected by policy.
+5. Action is applied through headless engine.
+6. Event row is recorded with board state before/after.
+7. Loop continues until winner/base-zero (or internal safety cap).
+
+### Policies
+
+- `random_legal` (default): random among legal actions.
+- `random_non_pass`: bias away from pass where possible.
+- `first_non_pass`: deterministic legacy style.
+
+## UI Features (Current)
+
+- Round-based timeline pagination.
+- Decision prompt grouping into substeps (`4a`, `4b`, etc.) with raw step mapping.
+- Match JSON (collapsible by default).
+- Card image hover + full-size modal in timeline rows.
+- Action detail summaries including:
+  - damage,
+  - deployments,
+  - defeated units,
+  - upgrade changes,
+  - stat deltas,
+  - capture changes,
+  - experience/token unit creation,
+  - leader/epic triggers.
+- Board state lines showing:
+  - HP, force, hand/deck/discard,
+  - ready/exhausted/total resources,
+  - active units with upgrades/captives,
+  - captured-unit summary.
+- Validation Matrix with expandable instance lists.
+- Keyword Trigger Audit table.
+
+## Simulation CLI (Batch)
+
+Examples:
 
 ```bash
 python -m sim_harness.cli deck upload --file path/to/deck.json --pool candidate --deck-id my-candidate
@@ -35,67 +103,34 @@ python -m sim_harness.cli deck show my-candidate --format swudb
 
 python -m sim_harness.cli sim create --candidate my-candidate --opponents all --games 25 --seed 123
 python -m sim_harness.cli sim results sim-20260101-120000
-python -m sim_harness.cli sim decks sim-20260101-120000
 python -m sim_harness.cli sim analysis sim-20260101-120000
 ```
 
-## Web Frontend
+## Rule/Engine Notes
 
-For a visual dashboard covering decks, simulations, match analysis, and run settings:
+- Set IDs (like `TWI_###`) are mapped to engine UUID IDs in the runner.
+- Unknown set IDs are rejected with explicit error output.
+- Event logs include legality at apply-time (not just pre-selection).
+- Illegal probes can be retried in-step when alternatives exist.
 
-```bash
-python -m sim_harness.web --host 127.0.0.1 --port 8765
-```
+## Validation Matrix Scope
 
-Open `http://127.0.0.1:8765` in your browser.
+The matrix is log-derived and only marks mechanics when evidence exists in action/event data.
+It is intended for simulation QA, not full formal proof of every card text branch.
 
-The UI supports:
-- uploading SWUDB deck JSON into `candidate` / `meta` / `starter` pools,
-- viewing deck list + full deck JSON,
-- creating simulations with seed/workers/opponent-set settings,
-- reviewing simulation history and analysis (overall, by-tier, best/worst matchup, per-opponent stats).
-- running a single match and following turn-by-turn events (action legality, card/cost/type, and per-step effects).
-- selecting single-match action policy: `random_legal` (default), `random_non_pass`, or `first_non_pass`.
-- viewing single-match timelines paginated by round, with optional decision-prompt filtering.
-- single-match runs default to full-game simulation (until game over, with an internal safety cap).
-- SWUDB-style set IDs are converted to engine UUID card IDs before simulation; unknown set IDs are rejected with an explicit error.
+For deep checks:
+1. open trigger instances,
+2. inspect the linked timeline steps,
+3. confirm board-state transitions and prompts.
 
-### Storage
+## Troubleshooting
 
-- Deck library: `sim_harness/data/decks.json`
-- Simulation history: `sim_harness/data/simulations.json`
+### `php: command not found`
+Install PHP CLI or set `PHP_BIN` environment variable.
 
-Deck `show --format swudb` prints the exact SWUDB JSON payload.
+### “Unknown set card IDs (no UUID mapping)”
+Deck contains IDs not present in current engine dictionary build.
 
-
-## Headless Rules Engine CLI (PHP)
-
-Rules execution is now separated from UI/UI-HTTP bindings via `EngineCLI.php` + `Engine/HeadlessEngine.php`.
-
-Example request:
-
-```bash
-printf '{"type":"init_game","deckA":{"material":["LAW_014","SEC_025"],"main":["JTL_203"]},"deckB":{"material":["LAW_114","SEC_125"],"main":["JTL_103"]},"seed":12345}' | php EngineCLI.php
-```
-
-Supported request types:
-- `init_game`
-- `get_observation`
-- `get_legal_actions`
-- `apply_action`
-
-Core interfaces exposed by the headless engine:
-- `getObservation($player_id)`
-- `getLegalActions($player_id)`
-- `applyAction($player_id, $action)`
-
-`init_game` returns structured events including initialization, state snapshot, player observation, and legal actions.
-
-
-### Rich match event output
-
-`sim_harness/php_match_runner.php` now emits per-action events with:
-- player, round, phase, chosen action, legality result
-- card metadata (`id`, `cost`, `type`)
-- phase snapshots at begin/end including resources, base health, hand/deck/discard, land arena, and space arena
-- derived per-player effect deltas between phase begin/end (including base health and spent/available resources)
+### UI step numbers look inconsistent
+Timeline displays grouped step labels; matrix instances can include raw step IDs.
+Use the shown raw step when cross-referencing engine event order.

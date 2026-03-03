@@ -2121,6 +2121,20 @@ function MustPlayPilot($player) {
   ;
 }
 
+// Cross-arena attacks are not generally allowed.
+// Only card text / scoped current-turn effects may grant that permission.
+function CanCrossArenaForAttack($attacker, $attackingPlayer)
+{
+  $attackerCardId = $attacker->CardID();
+  if ($attackerCardId == "5464125379") return true;//Strafing Gunship
+  if ($attackerCardId == "9667260960") return true;//Retrofitted Airspeeder
+  return SearchLimitedCurrentTurnEffects(
+    "4663781580",//Swoop Down
+    $attackingPlayer,
+    $attacker->UniqueID()
+  ) != -1;
+}
+
 function GetTargetsForAttack(Ally $attacker, bool $canAttackBase)
 {
   global $mainPlayer, $currentTurnEffects;
@@ -2128,6 +2142,7 @@ function GetTargetsForAttack(Ally $attacker, bool $canAttackBase)
   $defPlayer = $mainPlayer == 1 ? 2 : 1;
   $targets = $canAttackBase ? "THEIRCHAR-0" : "";
   $sentinelTargets = "";
+  $crossArenaAllowed = CanCrossArenaForAttack($attacker, $mainPlayer);
   // Check upgrades
   if($targets != "") {
     $attackerUpgrades = $attacker->GetUpgrades();
@@ -2154,12 +2169,11 @@ function GetTargetsForAttack(Ally $attacker, bool $canAttackBase)
   // Iterate through the targets
   $allies = &GetAllies($defPlayer);
   for ($i = 0; $i < count($allies); $i += AllyPieces()) {
-    // Check if the target is in the same arena, except for Strafing Gunship, Swoop Down
+    // By default, only same-arena attacks are legal.
+    // Cross-arena is allowed only when card text grants it.
     $defAlly = new Ally("MYALLY-" . $i, $defPlayer);
     if ($attacker->CurrentArena() != $defAlly->CurrentArena()
-        && $attacker->CardID() != "5464125379"//Strafing Gunship
-        && $attacker->CardID() != "9667260960"//Retrofitted Airspeeder
-        && !SearchCurrentTurnEffects("4663781580", $mainPlayer)//Swoop Down
+        && !$crossArenaAllowed
     ) continue;
 
     // Check if the target can be attacked

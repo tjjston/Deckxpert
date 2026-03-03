@@ -776,6 +776,8 @@ function applyAction(int $player_id, array $action): array
   $makeCheckpoint = 0;
   $makeBlockBackup = 0;
   $MakeStartTurnBackup = false;
+  // Match ProcessInput2.php behavior so FinalizeAction() can evaluate pass-mode correctly.
+  $GLOBALS['inputMode'] = intval($action['mode'] ?? 0);
   DoGamestateUpdate();
   BuildMyGamestate($player_id);
 

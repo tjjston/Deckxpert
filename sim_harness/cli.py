@@ -14,6 +14,8 @@ from .runner import MatchResult, run_benchmark
 DATA_DIR = Path("sim_harness") / "data"
 DECKS_FILE = DATA_DIR / "decks.json"
 SIMS_FILE = DATA_DIR / "simulations.json"
+SUPPORTED_MIN_DECK_SIZES = {30, 50}
+DEFAULT_MIN_DECK_SIZE = 50
 
 
 @dataclass
@@ -70,6 +72,26 @@ def _validate_swudb_deck(payload: dict[str, Any]) -> None:
     if not isinstance(payload["deck"], list) or len(payload["deck"]) == 0:
         raise ValueError("SWUDB deck list must be a non-empty array")
 
+
+
+def _deck_main_count(swudb: dict[str, Any]) -> int:
+    return sum(int(card.get("count", 0)) for card in swudb.get("deck", []))
+
+
+def _coerce_min_cards(value: Any, default: int = DEFAULT_MIN_DECK_SIZE) -> int:
+    if value is None:
+        return int(default)
+    min_cards = int(value)
+    if min_cards not in SUPPORTED_MIN_DECK_SIZES:
+        allowed = ", ".join(str(v) for v in sorted(SUPPORTED_MIN_DECK_SIZES))
+        raise ValueError(f"min_cards must be one of: {allowed}")
+    return min_cards
+
+
+def _assert_min_deck_size(swudb: dict[str, Any], min_cards: int, deck_label: str) -> None:
+    size = _deck_main_count(swudb)
+    if size < min_cards:
+        raise ValueError(f"{deck_label} has {size} cards; minimum required is {min_cards}")
 
 
 def _cards_to_expanded_ids(swudb: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -201,6 +223,8 @@ def _save_sims(sims: list[dict[str, Any]]) -> None:
 def cmd_sim_create(args: argparse.Namespace) -> int:
     decks = _load_decks()
     candidate = _find_deck(decks, args.candidate)
+    min_cards = _coerce_min_cards(getattr(args, "min_cards", DEFAULT_MIN_DECK_SIZE))
+    _assert_min_deck_size(candidate.swudb, min_cards, f"Candidate deck '{candidate.deck_id}'")
 
     if args.opponents == "all":
         opponents = [d for d in decks if d.deck_id != candidate.deck_id and d.pool in {"meta", "starter"}]
@@ -209,6 +233,14 @@ def cmd_sim_create(args: argparse.Namespace) -> int:
 
     if not opponents:
         raise ValueError("No opponent decks found for selected set. Upload decks to meta/starter pools first.")
+    invalid_opponents = [d for d in opponents if _deck_main_count(d.swudb) < min_cards]
+    if invalid_opponents:
+        sample = ", ".join(f"{d.deck_id}({_deck_main_count(d.swudb)})" for d in invalid_opponents[:8])
+        more = f" (+{len(invalid_opponents)-8} more)" if len(invalid_opponents) > 8 else ""
+        raise ValueError(
+            f"Opponent decks below minimum {min_cards} cards: {sample}{more}. "
+            "Use a lower minimum or upload larger decks."
+        )
 
     deck_pairs = [(_deck_to_runner_string(candidate.swudb), _deck_to_runner_string(o.swudb)) for o in opponents]
     results = run_benchmark(
@@ -255,6 +287,7 @@ def cmd_sim_create(args: argparse.Namespace) -> int:
         "games_per_opponent": args.games,
         "seed": args.seed,
         "workers": args.workers,
+        "min_cards": min_cards,
         "overall": {
             "games": all_games,
             "wins": all_wins,
@@ -370,6 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
     sim_create.add_argument("--workers", type=int, default=4)
     sim_create.add_argument("--php-script", default=None)
     sim_create.add_argument("--sim-id", default=None)
+    sim_create.add_argument("--min-cards", type=int, choices=sorted(SUPPORTED_MIN_DECK_SIZES), default=DEFAULT_MIN_DECK_SIZE)
     sim_create.set_defaults(func=cmd_sim_create)
 
     sim_results = sim_sub.add_parser("results", help="Show top-level sim results")

@@ -890,5 +890,160 @@
       "sideboard": []
     },
     "added_at": "2026-02-28T13:05:59.709621+00:00"
+  },
+  {
+    "deck_id": "SIT deck",
+    "pool": "candidate",
+    "swudb": {
+      "metadata": {
+        "name": "test deck",
+        "author": "Thomas"
+      },
+      "leader": {
+        "id": "TWI_016",
+        "count": 1
+      },
+      "base": {
+        "id": "TWI_024",
+        "count": 1
+      },
+      "deck": [
+        {
+          "id": "JTL_086",
+          "count": 1
+        },
+        {
+          "id": "JTL_189",
+          "count": 1
+        },
+        {
+          "id": "JTL_210",
+          "count": 1
+        },
+        {
+          "id": "JTL_215",
+          "count": 1
+        },
+        {
+          "id": "JTL_259",
+          "count": 1
+        },
+        {
+          "id": "LOF_121",
+          "count": 1
+        },
+        {
+          "id": "SEC_082",
+          "count": 1
+        },
+        {
+          "id": "SEC_092",
+          "count": 3
+        },
+        {
+          "id": "SEC_226",
+          "count": 1
+        },
+        {
+          "id": "SEC_235",
+          "count": 1
+        },
+        {
+          "id": "SHD_089",
+          "count": 1
+        },
+        {
+          "id": "SHD_107",
+          "count": 1
+        },
+        {
+          "id": "SHD_111",
+          "count": 1
+        },
+        {
+          "id": "SHD_185",
+          "count": 1
+        },
+        {
+          "id": "SHD_211",
+          "count": 1
+        },
+        {
+          "id": "SHD_230",
+          "count": 1
+        },
+        {
+          "id": "SOR_209",
+          "count": 1
+        },
+        {
+          "id": "TWI_113",
+          "count": 1
+        },
+        {
+          "id": "TWI_114",
+          "count": 2
+        },
+        {
+          "id": "TWI_118",
+          "count": 1
+        },
+        {
+          "id": "TWI_119",
+          "count": 1
+        },
+        {
+          "id": "TWI_120",
+          "count": 1
+        },
+        {
+          "id": "TWI_129",
+          "count": 1
+        },
+        {
+          "id": "TWI_183",
+          "count": 1
+        },
+        {
+          "id": "TWI_184",
+          "count": 1
+        },
+        {
+          "id": "TWI_213",
+          "count": 1
+        },
+        {
+          "id": "TWI_215",
+          "count": 1
+        },
+        {
+          "id": "TWI_218",
+          "count": 1
+        },
+        {
+          "id": "TWI_219",
+          "count": 1
+        },
+        {
+          "id": "TWI_220",
+          "count": 1
+        },
+        {
+          "id": "TWI_231",
+          "count": 1
+        },
+        {
+          "id": "TWI_235",
+          "count": 1
+        }
+      ],
+      "sideboard": [
+        {
+          "id": "TWI_114",
+          "count": 1
+        }
+      ]
+    },
+    "added_at": "2026-03-02T21:33:25.911219+00:00"
   }
 ]
