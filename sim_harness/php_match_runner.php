@@ -64,7 +64,7 @@ register_shutdown_function(function (): void {
 require_once __DIR__ . '/../Engine/HeadlessEngine.php';
 $GLOBALS['__runner_checkpoint'] = 'required_engine';
 
-$options = getopt('', ['seed:', 'deck-a:', 'deck-b:', 'deck-a-b64:', 'deck-b-b64:', 'match-id:', 'log-format::', 'max-actions::', 'policy::']);
+$options = getopt('', ['seed:', 'deck-a:', 'deck-b:', 'deck-a-b64:', 'deck-b-b64:', 'match-id:', 'log-format::', 'max-actions::', 'policy::', 'mcts-iterations::', 'mcts-max-depth::']);
 $seed = intval($options['seed'] ?? 0);
 $deckAInput = strval($options['deck-a'] ?? 'deck_a');
 $deckBInput = strval($options['deck-b'] ?? 'deck_b');
@@ -84,7 +84,13 @@ $maxActions = max(0, intval($options['max-actions'] ?? 0));
 $hardActionCap = 20000;
 $actionCap = $maxActions > 0 ? min($maxActions, $hardActionCap) : $hardActionCap;
 $policy = strtolower(trim(strval($options['policy'] ?? 'random_legal')));
-if (!in_array($policy, ['random_non_pass', 'random_legal', 'first_non_pass'], true)) {
+$mctsIterations = max(1, min(128, intval($options['mcts-iterations'] ?? 16)));
+$mctsMaxDepth = max(1, min(120, intval($options['mcts-max-depth'] ?? 14)));
+$mctsConfig = [
+  'iterations' => $mctsIterations,
+  'max_depth' => $mctsMaxDepth,
+];
+if (!in_array($policy, ['random_non_pass', 'random_legal', 'first_non_pass', 'heuristic', 'mcts'], true)) {
   $policy = 'random_legal';
 }
 
@@ -206,9 +212,421 @@ function shouldPreferNonPassForPrompt(string $phase): bool
   return str_contains($ctx, 'exploit');
 }
 
-function chooseAction(array $legalActions, int $seed, int $step, int $playerId, int $round, string $phase, string $policy): ?array
+function isPromptPhaseForSearch(string $phase): bool
 {
+  return in_array($phase, [
+    'YESNO',
+    'CHOOSEMULTIZONE',
+    'MAYCHOOSEMULTIZONE',
+    'CHOOSECARD',
+    'MAYCHOOSECARD',
+    'CHOOSEOPTION',
+    'MAYCHOOSEOPTION',
+    'BUTTONINPUT',
+    'BUTTONINPUTNOPASS',
+    'CHOOSEDECK',
+    'MAYCHOOSEDECK',
+    'HANDTOPBOTTOM',
+    'DYNPITCH',
+  ], true);
+}
+
+function heuristicActionScore(array $action, int $playerId, array $snapshot, string $phase): float
+{
+  $type = strval($action['type'] ?? '');
+  $opponentId = $playerId === 1 ? 2 : 1;
+  $self = $snapshot['player_' . $playerId] ?? [];
+  $opp = $snapshot['player_' . $opponentId] ?? [];
+  $myResources = intval($self['resources']['available'] ?? 0);
+  $myUnits = intval($self['counts']['active_units'] ?? 0);
+  $oppUnits = intval($opp['counts']['active_units'] ?? 0);
+  $myBaseHp = intval($self['base']['health'] ?? 0);
+  $oppBaseHp = intval($opp['base']['health'] ?? 0);
+  $phaseUpper = strtoupper($phase);
+
+  if ($type === 'pass') {
+    $score = -260.0;
+    if ($myResources <= 0) $score += 120.0;
+    if ($phaseUpper !== 'M') $score += 45.0;
+    if ($myUnits <= 0) $score += 25.0;
+    return $score;
+  }
+
+  $score = 0.0;
+  switch ($type) {
+    case 'play_character':
+      $score += 90.0;
+      break;
+    case 'play_hand':
+      $score += 70.0;
+      break;
+    case 'activate_ally':
+      $score += 64.0;
+      break;
+    case 'play_combat_chain':
+      $score += 60.0;
+      break;
+    case 'activate_item':
+    case 'activate_aura':
+    case 'play_arsenal':
+      $score += 46.0;
+      break;
+    case 'choose_zone':
+    case 'multi_choose':
+    case 'decision':
+    case 'yesno':
+      $score += 16.0;
+      break;
+    case 'claim_initiative':
+      $score += 18.0;
+      break;
+    default:
+      $score += 8.0;
+      break;
+  }
+
+  if ($phaseUpper === 'M' && ($type === 'play_hand' || $type === 'activate_ally' || $type === 'play_character')) {
+    $score += 8.0;
+  }
+  if ($oppUnits > $myUnits && ($type === 'activate_ally' || $type === 'play_hand' || $type === 'play_character')) {
+    $score += 11.0;
+  }
+
+  if ($type === 'claim_initiative') {
+    if ($myResources <= 1) $score += 20.0;
+    else $score -= 12.0;
+    if ($myUnits <= 0) $score += 10.0;
+  }
+
+  if ($type === 'choose_zone') {
+    $target = strval($action['cardID'] ?? '');
+    if (preg_match('/^THEIRALLY-\d+$/', $target) === 1) {
+      // Prefer lines that point interaction at enemy board pieces.
+      $score += 22.0;
+    } else if (preg_match('/^MYALLY-\d+$/', $target) === 1) {
+      $score -= 2.0;
+      $ctx = normalizedPromptContext();
+      if (str_contains($ctx, 'exploit')) $score += 18.0;
+    }
+  }
+
+  if ($type === 'yesno') {
+    $button = strtoupper(strval($action['buttonInput'] ?? ''));
+    if ($button === 'YES') $score += 2.0;
+    if ($button === 'NO') $score -= 2.0;
+  }
+
+  $rawCardId = resolveCardReferenceRaw($playerId, $action);
+  if ($rawCardId !== '') {
+    $cost = max(0, intval(CardCost($rawCardId)));
+    $score += floatval(min($cost, $myResources)) * 3.1;
+    $score += floatval(max(0, $cost - $myResources)) * -0.9;
+
+    if (DefinedTypesContains($rawCardId, 'Unit', $playerId)) $score += 12.0;
+    if (DefinedTypesContains($rawCardId, 'Event', $playerId)) $score += 9.0;
+    if (DefinedTypesContains($rawCardId, 'Upgrade', $playerId)) $score += 4.0;
+
+    if (HasKeyword($rawCardId, 'Ambush', $playerId, -1)) $score += 9.0;
+    if (HasKeyword($rawCardId, 'Sentinel', $playerId, -1)) $score += 8.0;
+    if (HasKeyword($rawCardId, 'Restore', $playerId, -1)) $score += 5.0;
+    if (HasKeyword($rawCardId, 'Saboteur', $playerId, -1)) $score += 4.0;
+    if (HasKeyword($rawCardId, 'Overwhelm', $playerId, -1)) $score += 4.0;
+  }
+
+  // Light strategic pressure: if ahead on base HP, initiative becomes slightly better.
+  $hpDiff = $myBaseHp - $oppBaseHp;
+  if ($type === 'claim_initiative' && $hpDiff > 0) $score += 3.0;
+
+  return $score;
+}
+
+function chooseHeuristicAction(
+  array $legalActions,
+  int $seed,
+  int $step,
+  int $playerId,
+  int $round,
+  string $phase,
+  array $snapshot
+): ?array {
   if (count($legalActions) === 0) return null;
+  if (count($snapshot) === 0) $snapshot = phaseSnapshot();
+
+  $bestScore = -INF;
+  $bestActions = [];
+  foreach ($legalActions as $action) {
+    $score = heuristicActionScore($action, $playerId, $snapshot, $phase);
+    if ($score > $bestScore + 1e-9) {
+      $bestScore = $score;
+      $bestActions = [$action];
+    } else if (abs($score - $bestScore) <= 1e-9) {
+      $bestActions[] = $action;
+    }
+  }
+
+  if (count($bestActions) === 1) return $bestActions[0];
+  $choiceIndex = deterministicChoiceIndex($bestActions, $seed, $step, $playerId, $round, $phase, 'heuristic');
+  return $bestActions[$choiceIndex] ?? $bestActions[0];
+}
+
+function chooseMctsRolloutAction(
+  array $legalActions,
+  int $seed,
+  int $iteration,
+  int $ply,
+  int $playerId,
+  int $round,
+  string $phase,
+  array $snapshot
+): ?array {
+  if (count($legalActions) === 0) return null;
+
+  // Keep the first rollout plies slightly informed; deeper plies stay pseudo-random.
+  if ($ply < 2) {
+    $heuristic = chooseHeuristicAction(
+      $legalActions,
+      $seed + ($iteration * 101) + $ply,
+      $ply + 1,
+      $playerId,
+      $round,
+      $phase,
+      $snapshot
+    );
+    if ($heuristic !== null) return $heuristic;
+  }
+
+  $nonPass = array_values(array_filter(
+    $legalActions,
+    static fn(array $action): bool => strval($action['type'] ?? '') !== 'pass'
+  ));
+  $candidates = $legalActions;
+  if (count($nonPass) > 0 && ($phase === 'M' || shouldPreferNonPassForPrompt($phase))) {
+    $candidates = $nonPass;
+  }
+
+  $choiceIndex = deterministicChoiceIndex(
+    $candidates,
+    $seed + ($iteration * 65537),
+    $ply + 1,
+    $playerId,
+    $round,
+    $phase,
+    'mcts_rollout'
+  );
+  return $candidates[$choiceIndex] ?? $candidates[0];
+}
+
+function mctsEvaluateSnapshotForPlayer(array $snapshot, int $rootPlayerId, int $depth, int $maxDepth): float
+{
+  $winner = baseWinnerFromSnapshot($snapshot);
+  if ($winner === $rootPlayerId) return 1.0;
+  if ($winner !== 0) return 0.0;
+
+  $opponentId = $rootPlayerId === 1 ? 2 : 1;
+  $self = $snapshot['player_' . $rootPlayerId] ?? [];
+  $opp = $snapshot['player_' . $opponentId] ?? [];
+
+  $myHp = intval($self['base']['health'] ?? 0);
+  $oppHp = intval($opp['base']['health'] ?? 0);
+  $myUnits = intval($self['counts']['active_units'] ?? 0);
+  $oppUnits = intval($opp['counts']['active_units'] ?? 0);
+  $myRes = intval($self['resources']['available'] ?? 0);
+  $oppRes = intval($opp['resources']['available'] ?? 0);
+
+  $hpTerm = ($myHp - $oppHp) / 30.0;
+  $unitTerm = ($myUnits - $oppUnits) / 8.0;
+  $resTerm = ($myRes - $oppRes) / 8.0;
+  $depthPenalty = ($maxDepth > 0 ? min(1.0, max(0.0, $depth / $maxDepth)) : 0.0) * 0.03;
+
+  $score = 0.5 + (0.32 * $hpTerm) + (0.14 * $unitTerm) + (0.06 * $resTerm) - $depthPenalty;
+  if ($score < 0.0) return 0.0;
+  if ($score > 1.0) return 1.0;
+  return $score;
+}
+
+function simulateMctsRollout(int $rootPlayerId, int $seed, int $iteration, int $maxDepth): float
+{
+  $noLegalActionStreak = 0;
+
+  for ($ply = 0; $ply < $maxDepth; ++$ply) {
+    $snapshot = phaseSnapshot();
+    $winner = baseWinnerFromSnapshot($snapshot);
+    if ($winner !== 0) return $winner === $rootPlayerId ? 1.0 : 0.0;
+    if (boolval(IsGameOver())) {
+      return mctsEvaluateSnapshotForPlayer($snapshot, $rootPlayerId, $ply, $maxDepth);
+    }
+
+    $turnSnapshot = $GLOBALS['turn'] ?? ['-', '0'];
+    $phase = strval($turnSnapshot[0] ?? '-');
+    $round = intval($GLOBALS['currentRound'] ?? 1);
+    $turnPlayer = intval($turnSnapshot[1] ?? 0);
+    $priorityPlayer = intval($GLOBALS['currentPlayer'] ?? 0);
+    $resolved = resolveActingPlayerAndLegalActions($turnPlayer, $priorityPlayer);
+    $playerId = intval($resolved['player_id'] ?? ($turnPlayer > 0 ? $turnPlayer : 1));
+    $legalActions = is_array($resolved['actions'] ?? null) ? $resolved['actions'] : [];
+
+    if (count($legalActions) === 0) {
+      $noLegalActionStreak++;
+      if ($noLegalActionStreak >= 2) {
+        return mctsEvaluateSnapshotForPlayer($snapshot, $rootPlayerId, $ply, $maxDepth);
+      }
+      continue;
+    }
+    $noLegalActionStreak = 0;
+
+    $chosen = chooseMctsRolloutAction($legalActions, $seed, $iteration, $ply, $playerId, $round, $phase, $snapshot);
+    if ($chosen === null) {
+      return mctsEvaluateSnapshotForPlayer($snapshot, $rootPlayerId, $ply, $maxDepth);
+    }
+
+    $result = applyAction($playerId, $chosen);
+    if (boolval($result['ok'] ?? false)) continue;
+
+    // Rollout safety: try pass before terminating this playout.
+    $passAction = findPassAction($legalActions);
+    if ($passAction === null) {
+      return mctsEvaluateSnapshotForPlayer(phaseSnapshot(), $rootPlayerId, $ply, $maxDepth);
+    }
+    $passResult = applyAction($playerId, $passAction);
+    if (!boolval($passResult['ok'] ?? false)) {
+      return mctsEvaluateSnapshotForPlayer(phaseSnapshot(), $rootPlayerId, $ply, $maxDepth);
+    }
+  }
+
+  return mctsEvaluateSnapshotForPlayer(phaseSnapshot(), $rootPlayerId, $maxDepth, $maxDepth);
+}
+
+function chooseMctsAction(
+  array $legalActions,
+  int $seed,
+  int $step,
+  int $playerId,
+  int $round,
+  string $phase,
+  array $snapshot,
+  array $mctsConfig
+): ?array {
+  if (count($legalActions) === 0) return null;
+  if (count($legalActions) === 1) return $legalActions[0];
+
+  $iterations = max(1, intval($mctsConfig['iterations'] ?? 16));
+  $maxDepth = max(1, intval($mctsConfig['max_depth'] ?? 14));
+
+  $rootSnapshot = headlessCaptureGamestateSnapshot();
+  $children = [];
+  foreach ($legalActions as $action) {
+    $key = json_encode($action, JSON_UNESCAPED_SLASHES);
+    $children[$key] = [
+      'action' => $action,
+      'visits' => 0,
+      'value' => 0.0,
+    ];
+  }
+
+  $totalVisits = 0;
+  $exploration = 1.2;
+
+  for ($iter = 0; $iter < $iterations; ++$iter) {
+    headlessRestoreGamestateSnapshot($rootSnapshot);
+
+    $selectedKey = '';
+    $unvisited = [];
+    foreach ($children as $key => $child) {
+      if (intval($child['visits']) === 0) $unvisited[$key] = $child['action'];
+    }
+
+    if (count($unvisited) > 0) {
+      $candidate = chooseHeuristicAction(
+        array_values($unvisited),
+        $seed + $iter,
+        $step + $iter,
+        $playerId,
+        $round,
+        $phase,
+        $snapshot
+      );
+      if ($candidate === null) {
+        $candidate = array_values($unvisited)[0];
+      }
+      $selectedKey = json_encode($candidate, JSON_UNESCAPED_SLASHES);
+      if (!isset($children[$selectedKey])) {
+        $selectedKey = array_key_first($unvisited);
+      }
+    } else {
+      $bestScore = -INF;
+      foreach ($children as $key => $child) {
+        $visits = max(1, intval($child['visits']));
+        $avg = floatval($child['value']) / $visits;
+        $ucb = $avg + $exploration * sqrt(log(max(1, $totalVisits)) / $visits);
+        $jitterRaw = hexdec(substr(hash('sha256', $key . '|' . $seed . '|' . $iter), 0, 6));
+        $jitter = (is_numeric($jitterRaw) ? floatval($jitterRaw) : 0.0) / 1000000000.0;
+        $score = $ucb + $jitter;
+        if ($score > $bestScore) {
+          $bestScore = $score;
+          $selectedKey = $key;
+        }
+      }
+    }
+
+    if ($selectedKey === '' || !isset($children[$selectedKey])) continue;
+
+    $rootAction = $children[$selectedKey]['action'];
+    $applyRoot = applyAction($playerId, $rootAction);
+    if (!boolval($applyRoot['ok'] ?? false)) {
+      $reward = 0.0;
+    } else {
+      $reward = simulateMctsRollout($playerId, $seed + $step, $iter, $maxDepth);
+    }
+
+    $children[$selectedKey]['visits'] = intval($children[$selectedKey]['visits']) + 1;
+    $children[$selectedKey]['value'] = floatval($children[$selectedKey]['value']) + $reward;
+    $totalVisits++;
+  }
+
+  headlessRestoreGamestateSnapshot($rootSnapshot);
+
+  $bestAction = $legalActions[0];
+  $bestVisits = -1;
+  $bestAvg = -INF;
+  foreach ($children as $child) {
+    $visits = intval($child['visits']);
+    $avg = $visits > 0 ? (floatval($child['value']) / $visits) : -INF;
+    if ($visits > $bestVisits || ($visits === $bestVisits && $avg > $bestAvg)) {
+      $bestVisits = $visits;
+      $bestAvg = $avg;
+      $bestAction = $child['action'];
+    }
+  }
+  return $bestAction;
+}
+
+function chooseAction(
+  array $legalActions,
+  int $seed,
+  int $step,
+  int $playerId,
+  int $round,
+  string $phase,
+  string $policy,
+  array $snapshot = [],
+  array $policyConfig = []
+): ?array {
+  if (count($legalActions) === 0) return null;
+  if (count($snapshot) === 0) $snapshot = phaseSnapshot();
+
+  if ($policy === 'mcts') {
+    // Prompt-heavy phases have low branching and immediate tactical answers;
+    // use heuristic there to keep MCTS budget focused on meaningful action phases.
+    if (isPromptPhaseForSearch($phase) || count($legalActions) <= 2) {
+      return chooseHeuristicAction($legalActions, $seed, $step, $playerId, $round, $phase, $snapshot);
+    }
+    $mctsConfig = is_array($policyConfig['mcts'] ?? null) ? $policyConfig['mcts'] : [];
+    return chooseMctsAction($legalActions, $seed, $step, $playerId, $round, $phase, $snapshot, $mctsConfig);
+  }
+
+  if ($policy === 'heuristic') {
+    return chooseHeuristicAction($legalActions, $seed, $step, $playerId, $round, $phase, $snapshot);
+  }
 
   if ($policy === 'first_non_pass') {
     foreach ($legalActions as $action) {
@@ -1426,7 +1844,17 @@ for ($step = 1; $step <= $actionCap; ++$step) {
       $candidateActions = $legalActions;
     }
 
-    $chosen = chooseAction($candidateActions, $seed, $step, $playerId, $round, $phase, $policy);
+    $chosen = chooseAction(
+      $candidateActions,
+      $seed,
+      $step,
+      $playerId,
+      $round,
+      $phase,
+      $policy,
+      $phaseBegin,
+      ['mcts' => $mctsConfig]
+    );
     if ($chosen === null) break;
 
     // Prevent pathological loops where one always-legal action is repeatedly chosen.
@@ -1634,6 +2062,8 @@ $response = [
     'max_actions_requested' => $maxActions,
     'action_cap' => $actionCap,
     'terminated_reason' => $terminatedReason,
+    'mcts_iterations' => ($policy === 'mcts' ? $mctsIterations : 0),
+    'mcts_max_depth' => ($policy === 'mcts' ? $mctsMaxDepth : 0),
   ],
   'setup' => [
     'starting_round' => intval($GLOBALS['currentRound'] ?? 1),
@@ -1675,6 +2105,8 @@ if ($json === false) {
       'max_actions_requested' => $maxActions,
       'action_cap' => $actionCap,
       'terminated_reason' => 'json_encode_failed',
+      'mcts_iterations' => ($policy === 'mcts' ? $mctsIterations : 0),
+      'mcts_max_depth' => ($policy === 'mcts' ? $mctsMaxDepth : 0),
       'json_error' => json_last_error_msg(),
     ],
     'events' => [],

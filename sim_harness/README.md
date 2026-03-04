@@ -11,6 +11,7 @@ It uses the same core rules logic as Arena, but runs matches headlessly for:
 
 1. **Deck management**
 - Upload SWUDB JSON decks.
+- Remove decks from the local deck list.
 - Store decks in local pools: `candidate`, `meta`, `starter`.
 
 2. **Single match execution**
@@ -21,6 +22,7 @@ It uses the same core rules logic as Arena, but runs matches headlessly for:
 3. **Batch simulation**
 - Run candidate deck vs selected opponent pool.
 - Track aggregate win rates and matchup summaries.
+- Persist a full illegal-move audit per simulation (every illegal step with context).
 
 4. **Validation tooling**
 - Keyword Trigger Audit.
@@ -49,6 +51,42 @@ Requirements:
 
 If PHP is missing, match execution will fail with a PHP binary error.
 
+### Docker + Multi-GPU Runtime
+
+To run the same dashboard in Docker with CUDA access (for RL training jobs):
+
+```bash
+# Uses base compose + GPU override image/service config
+SIM_HARNESS_GPU_DEVICES=0,1 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build sim-harness-web
+```
+
+Then open:
+- `http://127.0.0.1:8765`
+
+Notes:
+- Requires NVIDIA Container Toolkit on the host.
+- `SIM_HARNESS_GPU_DEVICES=0,1` pins jobs to your two GPUs (e.g., RTX A4500 + RTX 5000).
+- GPU-enabled image definition: `docker/sim-harness-gpu.Dockerfile`.
+
+#### Docker Setup Tips
+
+- Verify host GPU container support:
+```bash
+docker run --rm --gpus all nvidia/cuda:12.3.2-runtime-ubuntu22.04 nvidia-smi
+```
+- Verify running `sim-harness-web` container sees GPUs:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml exec sim-harness-web nvidia-smi
+```
+- Verify PyTorch CUDA visibility inside container:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml exec sim-harness-web python -c "import torch; print('cuda:', torch.cuda.is_available(), 'count:', torch.cuda.device_count())"
+```
+- GPU selection examples:
+  - use both cards: `SIM_HARNESS_GPU_DEVICES=0,1`
+  - use one card: `SIM_HARNESS_GPU_DEVICES=0`
+  - disable GPU for testing: set ML job device to `cpu` in the UI.
+
 ## Single Match Behavior
 
 Single-match run path:
@@ -65,6 +103,12 @@ Single-match run path:
 - `random_legal` (default): random among legal actions.
 - `random_non_pass`: bias away from pass where possible.
 - `first_non_pass`: deterministic legacy style.
+- `heuristic`: rule-based scorer (tempo + board pressure + non-pass bias).
+- `mcts`: Monte Carlo Tree Search starter (root-level UCT + rollout simulation).
+
+`mcts` tuning flags (PHP runner / CLI pass-through):
+- `--mcts-iterations` (default `16`)
+- `--mcts-max-depth` (default `14`)
 
 ## UI Features (Current)
 
@@ -88,6 +132,54 @@ Single-match run path:
   - captured-unit summary.
 - Validation Matrix with expandable instance lists.
 - Keyword Trigger Audit table.
+- Simulation Illegal Move Audit tile (all illegal rows + top illegal action types).
+- ML Lab tab:
+  - launch async jobs for `sim create`, `sim shootout`, `rl collect`, `rl train`,
+  - set per-job `CUDA_VISIBLE_DEVICES`,
+  - monitor queue status + live logs,
+  - stop running jobs from the dashboard.
+
+## ML Changes (New)
+
+- New API routes in `sim_harness.web`:
+  - `GET /api/ml/info`
+  - `GET /api/ml/jobs`
+  - `GET /api/ml/jobs/<job_id>`
+  - `POST /api/ml/jobs`
+  - `POST /api/ml/jobs/<job_id>/stop`
+- New background job manager:
+  - queues and runs ML/sim commands asynchronously,
+  - stores rolling logs and exit codes,
+  - supports cancellation for queued/running jobs.
+- New web controls in ML Lab:
+  - start sim/collect/train jobs without blocking the UI,
+  - review command + logs per job,
+  - reuse discovered RL dataset/vocab artifacts from the runtime.
+
+## Daily Backups (30 Days, Space-Efficient)
+
+- Automatic backup is run by `sim_harness` commands and write paths.
+- Snapshot retention is fixed to the last `30` daily snapshots.
+- Snapshot location: `sim_harness/data/backups/YYYY-MM-DD/`
+  - includes `decks.json`, `simulations.json`, and a `manifest.json`.
+- RL/training data is stored as deduplicated compressed blobs:
+  - blob location: `sim_harness/data/backups/rl_blobs/*.tar.gz`
+  - snapshots reference blobs via `rl_blob` in each `manifest.json`
+  - unchanged RL data does not create duplicate archives.
+- Old snapshots and orphaned RL blobs are pruned automatically.
+
+Restore examples:
+```bash
+# restore deck list from a snapshot day
+cp sim_harness/data/backups/2026-03-03/decks.json sim_harness/data/decks.json
+
+# inspect RL blob used by that day
+cat sim_harness/data/backups/2026-03-03/manifest.json
+
+# extract a referenced RL blob to /tmp/rl-restore
+mkdir -p /tmp/rl-restore
+tar -xzf sim_harness/data/backups/rl_blobs/<blob-name>.tar.gz -C /tmp/rl-restore
+```
 
 ## Simulation CLI (Batch)
 
@@ -102,9 +194,33 @@ python -m sim_harness.cli deck list --pool all
 python -m sim_harness.cli deck show my-candidate --format swudb
 
 python -m sim_harness.cli sim create --candidate my-candidate --opponents all --games 25 --seed 123
+python -m sim_harness.cli sim create --candidate my-candidate --opponents all --games 25 --seed 123 --policy heuristic
+python -m sim_harness.cli sim create --candidate my-candidate --opponents all --games 10 --seed 123 --policy mcts --mcts-iterations 24 --mcts-max-depth 18
+python -m sim_harness.cli sim shootout --candidate my-candidate --opponents all --games 30 --seed 123 --policies random_legal,heuristic,mcts --mcts-iterations 24 --mcts-max-depth 18
 python -m sim_harness.cli sim results sim-20260101-120000
 python -m sim_harness.cli sim analysis sim-20260101-120000
 ```
+
+## RL Scaffold (Dataset + Training)
+
+Use this to bootstrap policy/value learning from your simulated games:
+
+```bash
+# 1) Collect supervised dataset from strong policies (same matchup + seed policy)
+python -m sim_harness.cli rl collect --candidate my-candidate --opponents all --games 25 --seed 123 --policies heuristic,mcts --mcts-iterations 24 --mcts-max-depth 18
+
+# 2) Train a policy/value network
+python -m sim_harness.cli rl train --dataset sim_harness/data/rl/my-candidate-YYYYMMDD-HHMMSS.jsonl --vocab sim_harness/data/rl/my-candidate-YYYYMMDD-HHMMSS.vocab.json --model-out sim_harness/data/rl/my-candidate-policy.pt --epochs 12 --batch-size 256
+```
+
+Outputs from `rl collect`:
+- `<prefix>.jsonl`: per-decision rows (features, action key, value target, metadata).
+- `<prefix>.vocab.json`: action vocabulary used for policy targets.
+- `<prefix>.meta.json`: collection settings and summary counts.
+
+Requirements for `rl train`:
+- `numpy`
+- `torch` (PyTorch)
 
 ## Rule/Engine Notes
 

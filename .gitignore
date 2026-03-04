@@ -17,3 +17,5 @@ Utils/LeaderImages/
 Utils/jpg/
 user_ip_log.txt
 APIKeys/APIKeys.php
+sim_harness/data/backups/
+sim_harness/data/decks.backup-*.json

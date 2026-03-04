@@ -1,0 +1,14 @@
+version: "3.7"
+services:
+  sim-harness-web:
+    build:
+      context: .
+      dockerfile: docker/sim-harness-gpu.Dockerfile
+    image: deckxpert-sim-harness-gpu:local
+    command: python -m sim_harness.web --host 0.0.0.0 --port 8765
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "${SIM_HARNESS_GPU_DEVICES:-0,1}"
+      CUDA_VISIBLE_DEVICES: "${SIM_HARNESS_GPU_DEVICES:-0,1}"
+      NVIDIA_DRIVER_CAPABILITIES: "${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}"
+      PYTHONUNBUFFERED: "1"
+    gpus: all

@@ -4,8 +4,12 @@ import base64
 import json
 import mimetypes
 import os
+import shlex
 import subprocess
+import sys
+import threading
 import uuid
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,9 +31,10 @@ input,select,textarea,button{width:100%;box-sizing:border-box;margin-bottom:8px;
 textarea{min-height:120px;font-family:ui-monospace,monospace}button{background:#1d4ed8;border-color:#1d4ed8;cursor:pointer}button:hover{background:#1e40af}
 table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:auto}th,td{border-bottom:1px solid #334155;text-align:left;padding:6px;font-size:12px;vertical-align:top;white-space:nowrap;overflow-wrap:normal;word-break:normal}.grid{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:12px}
 .topTiles{display:grid;grid-template-columns:repeat(4,minmax(260px,1fr));gap:12px;align-items:start;margin-bottom:12px}
+.mlGrid{display:grid;grid-template-columns:repeat(3,minmax(260px,1fr));gap:12px}
 .singleMatchGrid{display:grid;grid-template-columns:minmax(0,2fr) minmax(360px,1fr);gap:12px;align-items:start}
 @media (max-width:1400px){.topTiles{grid-template-columns:repeat(2,minmax(260px,1fr))}}
-@media (max-width:1200px){.singleMatchGrid{grid-template-columns:1fr}.topTiles{grid-template-columns:1fr}}
+@media (max-width:1200px){.singleMatchGrid{grid-template-columns:1fr}.topTiles{grid-template-columns:1fr}.mlGrid{grid-template-columns:1fr}}
 .muted{color:#94a3b8;font-size:12px}pre{white-space:pre;overflow:auto;background:#020617;border:1px solid #334155;border-radius:8px;padding:10px}
 .ok{color:#22c55e}.bad{color:#ef4444}
 .cardRef{cursor:pointer;color:#93c5fd;text-decoration:underline}
@@ -46,6 +51,7 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 .attackTargetAction{display:inline-flex;align-items:center;gap:6px;padding:1px 8px;border-radius:999px;border:1px solid #f59e0b;background:#7c2d12;color:#ffedd5;font-weight:700;letter-spacing:.01em}
 .attackTargetAction .attackTargetTag{font-size:10px;text-transform:uppercase;color:#fde68a}
 .attackTargetAction .attackTargetValue{font-size:12px;color:#ffffff}
+.logBox{min-height:220px;max-height:420px}
 #cardHover{display:none;position:fixed;z-index:9999;pointer-events:none;background:#020617;border:1px solid #334155;border-radius:10px;padding:8px;box-shadow:0 12px 30px rgba(0,0,0,.45)}
 #cardHover img{height:min(46vh,520px);width:auto;display:block;border-radius:8px}
 #cardHover .meta{margin-top:6px;font-size:12px;color:#cbd5e1;max-width:260px}
@@ -67,7 +73,9 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 <label>Player A deck</label><select id=\"deckA\"></select>
 <label>Player B deck</label><select id=\"deckB\"></select>
 <label>Deck Minimum</label><select id=\"matchMinCards\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
-<label>Policy</label><select id=\"matchPolicy\"><option value=\"random_legal\">Random legal (uniform, recommended)</option><option value=\"random_non_pass\">Random legal (prefer non-pass)</option><option value=\"first_non_pass\">First non-pass (legacy)</option></select>
+<label>Policy</label><select id=\"matchPolicy\"><option value=\"random_legal\">Random legal (uniform, recommended)</option><option value=\"random_non_pass\">Random legal (prefer non-pass)</option><option value=\"first_non_pass\">First non-pass (legacy)</option><option value=\"heuristic\">Heuristic (rule-based)</option><option value=\"mcts\">MCTS starter</option></select>
+<label>MCTS Iterations</label><input id=\"matchMctsIterations\" type=\"number\" value=\"16\"/>
+<label>MCTS Rollout Depth</label><input id=\"matchMctsDepth\" type=\"number\" value=\"14\"/>
 <label>Seed</label><input id=\"matchSeed\" type=\"number\" value=\"123\"/>
 <button onclick=\"runSingleMatch()\">Run Match</button><div id=\"matchMsg\" class=\"muted\">Runs until game over (or safety cap).</div></div>
 
@@ -75,6 +83,9 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 <label>Candidate Deck</label><select id=\"candidate\"></select>
 <label>Opponent Set</label><select id=\"opponents\"><option>all</option><option>meta</option><option>starter</option></select>
 <label>Deck Minimum</label><select id=\"simMinCards\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
+<label>Policy</label><select id=\"simPolicy\"><option value=\"random_legal\">Random legal (uniform)</option><option value=\"random_non_pass\">Random legal (prefer non-pass)</option><option value=\"first_non_pass\">First non-pass (legacy)</option><option value=\"heuristic\">Heuristic (rule-based)</option><option value=\"mcts\">MCTS starter</option></select>
+<label>MCTS Iterations</label><input id=\"simMctsIterations\" type=\"number\" value=\"16\"/>
+<label>MCTS Rollout Depth</label><input id=\"simMctsDepth\" type=\"number\" value=\"14\"/>
 <label>Games per Opponent</label><input id=\"games\" type=\"number\" value=\"20\"/>
 <label>Seed</label><input id=\"seed\" type=\"number\" value=\"42\"/>
 <label>Workers</label><input id=\"workers\" type=\"number\" value=\"4\"/>
@@ -82,13 +93,85 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 <label>Simulation ID (optional)</label><input id=\"simId\" placeholder=\"sim-my-run\"/>
 <button onclick=\"createSimulation()\">Run Simulation</button><div id=\"simMsg\" class=\"muted\"></div></div>
 
-<div class=\"card\"><h3>Settings</h3><div id=\"settings\" class=\"muted\"></div></div>
+<div class=\"card\"><h3>How To Use (Best Results)</h3>
+<div class=\"muted\">
+1) Upload decks into pools: your test deck in <code>candidate</code>, benchmarks in <code>meta</code>/<code>starter</code>.<br/>
+2) Run <strong>Follow One Match</strong> with <code>heuristic</code> or <code>mcts</code> to confirm engine behavior and legality.<br/>
+3) Run <strong>Create Simulation</strong> (or ML Lab <code>sim_shootout</code>) to benchmark random vs heuristic vs mcts on the same seed set.<br/>
+4) In <strong>ML Lab</strong>, run <code>rl_collect</code> with policies like <code>heuristic,mcts</code> to build training data.<br/>
+5) Run <code>rl_train</code> with <code>device=cuda</code> and GPUs <code>0,1</code> (or a single GPU) to train policy/value checkpoints.<br/>
+6) Re-run shootouts and sims to validate win-rate lift and illegal-move stability before using models in deck scoring.<br/>
+Backup tip: copy <code>sim_harness/data/decks.json</code> before major runs.
+</div>
+<pre id=\"howToRuntime\" class=\"muted\">Runtime info loading...</pre>
+</div>
+</div>
+<div class=\"card\"><h3>ML Lab (Async Sims + Training)</h3>
+<div id=\"mlInfo\" class=\"muted\">Loading runtime info...</div>
+<div class=\"mlGrid\">
+<div class=\"card\"><h3>Simulation Job</h3>
+<label>Candidate Deck</label><select id=\"mlSimCandidate\"></select>
+<label>Mode</label><select id=\"mlSimKind\"><option value=\"sim_create\">sim create</option><option value=\"sim_shootout\">sim shootout</option></select>
+<label>Opponents</label><select id=\"mlSimOpponents\"><option>all</option><option>meta</option><option>starter</option></select>
+<label>Deck Minimum</label><select id=\"mlSimMinCards\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
+<label>Policy (sim create)</label><select id=\"mlSimPolicy\"><option value=\"random_legal\">random_legal</option><option value=\"random_non_pass\">random_non_pass</option><option value=\"first_non_pass\">first_non_pass</option><option value=\"heuristic\">heuristic</option><option value=\"mcts\">mcts</option></select>
+<label>Policies (sim shootout, csv)</label><input id=\"mlSimPolicies\" value=\"random_legal,heuristic,mcts\"/>
+<label>MCTS Iterations</label><input id=\"mlSimMctsIterations\" type=\"number\" value=\"24\"/>
+<label>MCTS Max Depth</label><input id=\"mlSimMctsDepth\" type=\"number\" value=\"18\"/>
+<label>Games per Opponent</label><input id=\"mlSimGames\" type=\"number\" value=\"30\"/>
+<label>Seed</label><input id=\"mlSimSeed\" type=\"number\" value=\"123\"/>
+<label>Workers</label><input id=\"mlSimWorkers\" type=\"number\" value=\"6\"/>
+<label>GPU Devices (CUDA_VISIBLE_DEVICES)</label><input id=\"mlSimGpuDevices\" value=\"0,1\"/>
+<label>PHP Script (optional)</label><input id=\"mlSimPhpScript\" value=\"sim_harness/php_match_runner.php\"/>
+<label>Simulation ID (sim create)</label><input id=\"mlSimId\" placeholder=\"sim-gpu-run\"/>
+<label>Shootout Output JSON (optional)</label><input id=\"mlShootoutOutJson\" placeholder=\"sim_harness/data/shootout-latest.json\"/>
+<button onclick=\"startMlSimJob()\">Start Sim Job</button><div id=\"mlSimMsg\" class=\"muted\"></div>
+</div>
+<div class=\"card\"><h3>RL Collect Job</h3>
+<label>Candidate Deck</label><select id=\"mlCollectCandidate\"></select>
+<label>Opponents</label><select id=\"mlCollectOpponents\"><option>all</option><option>meta</option><option>starter</option></select>
+<label>Deck Minimum</label><select id=\"mlCollectMinCards\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
+<label>Policies (csv)</label><input id=\"mlCollectPolicies\" value=\"heuristic,mcts\"/>
+<label>MCTS Iterations</label><input id=\"mlCollectMctsIterations\" type=\"number\" value=\"24\"/>
+<label>MCTS Max Depth</label><input id=\"mlCollectMctsDepth\" type=\"number\" value=\"18\"/>
+<label>Games per Opponent</label><input id=\"mlCollectGames\" type=\"number\" value=\"25\"/>
+<label>Seed</label><input id=\"mlCollectSeed\" type=\"number\" value=\"123\"/>
+<label>Workers</label><input id=\"mlCollectWorkers\" type=\"number\" value=\"6\"/>
+<label>Hash Dim</label><input id=\"mlCollectHashDim\" type=\"number\" value=\"256\"/>
+<label>GPU Devices (optional)</label><input id=\"mlCollectGpuDevices\" value=\"0,1\"/>
+<label>Output Prefix (optional)</label><input id=\"mlCollectOutputPrefix\" placeholder=\"sim_harness/data/rl/my-candidate-gpu\"/>
+<button onclick=\"startMlCollectJob()\">Start RL Collect</button><div id=\"mlCollectMsg\" class=\"muted\"></div>
+</div>
+<div class=\"card\"><h3>RL Train Job</h3>
+<label>Dataset JSONL</label><input id=\"mlTrainDataset\" list=\"mlDatasetList\" placeholder=\"sim_harness/data/rl/...jsonl\"/>
+<datalist id=\"mlDatasetList\"></datalist>
+<label>Vocab JSON</label><input id=\"mlTrainVocab\" list=\"mlVocabList\" placeholder=\"sim_harness/data/rl/...vocab.json\"/>
+<datalist id=\"mlVocabList\"></datalist>
+<label>Model Output (.pt)</label><input id=\"mlTrainModelOut\" value=\"sim_harness/data/rl/policy_value_latest.pt\"/>
+<label>Device</label><select id=\"mlTrainDevice\"><option value=\"auto\">auto</option><option value=\"cuda\">cuda</option><option value=\"cpu\">cpu</option></select>
+<label>GPU Devices (CUDA_VISIBLE_DEVICES)</label><input id=\"mlTrainGpuDevices\" value=\"0,1\"/>
+<label>Epochs</label><input id=\"mlTrainEpochs\" type=\"number\" value=\"12\"/>
+<label>Batch Size</label><input id=\"mlTrainBatchSize\" type=\"number\" value=\"512\"/>
+<label>Learning Rate</label><input id=\"mlTrainLr\" value=\"0.001\"/>
+<label>Weight Decay</label><input id=\"mlTrainWeightDecay\" value=\"0.00001\"/>
+<label>Validation Split</label><input id=\"mlTrainValSplit\" value=\"0.1\"/>
+<label>Hidden Dim</label><input id=\"mlTrainHiddenDim\" type=\"number\" value=\"256\"/>
+<label>Hidden Layers</label><input id=\"mlTrainHiddenLayers\" type=\"number\" value=\"2\"/>
+<label>Dropout</label><input id=\"mlTrainDropout\" value=\"0.1\"/>
+<button onclick=\"startMlTrainJob()\">Start RL Train</button><div id=\"mlTrainMsg\" class=\"muted\"></div>
+</div>
+</div>
+<h3>ML Job Queue</h3>
+<table><thead><tr><th>ID</th><th>Type</th><th>Status</th><th>GPU</th><th>Started</th><th>Ended</th><th>Exit</th><th></th></tr></thead><tbody id=\"mlJobsTbody\"></tbody></table>
+<div class=\"muted\" id=\"mlJobMeta\">Select a job to view full logs.</div>
+<pre id=\"mlJobLogs\" class=\"logBox\">No job selected.</pre>
 </div>
 <div class=\"grid\">
 <div class=\"card\"><h3>Decks</h3><table><thead><tr><th>ID</th><th>Pool</th><th>Name</th><th>Cards</th><th></th></tr></thead><tbody id=\"decksTbody\"></tbody></table></div>
-<div class=\"card\"><h3>Simulations</h3><table><thead><tr><th>ID</th><th>Candidate</th><th>Winrate</th><th>Games</th><th></th></tr></thead><tbody id=\"simsTbody\"></tbody></table></div>
+<div class=\"card\"><h3>Simulations</h3><table><thead><tr><th>ID</th><th>Candidate</th><th>Winrate</th><th>Games</th><th>Illegal</th><th></th></tr></thead><tbody id=\"simsTbody\"></tbody></table></div>
 </div>
 <div class=\"card\"><h3>Simulation Analysis</h3><pre id=\"analysis\">Select a simulation to inspect analysis.</pre></div>
+<div class=\"card\"><h3>Simulation Illegal Move Audit</h3><div id=\"simIllegalSummary\" class=\"muted\">Select a simulation to inspect illegal move details.</div><table><thead><tr><th>Match</th><th>Opponent</th><th>Step</th><th>Round</th><th>Phase</th><th>Player</th><th>Action</th><th>Card</th><th>Message</th><th>Legal Options</th></tr></thead><tbody id=\"simIllegalTbody\"></tbody></table></div>
 <div class=\"card\"><h3>Deck JSON Viewer (SWUDB)</h3><pre id=\"deckView\">Select a deck to view SWUDB JSON.</pre></div>
 <div class=\"singleMatchGrid\">
 <div class=\"card\"><h3>Single Match Timeline</h3><div style=\"display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;\"><span class=\"muted\">Match JSON</span><button id=\"toggleMatchSummaryBtn\" style=\"width:auto;margin:0;padding:4px 10px;\" onclick=\"toggleMatchSummary()\">Expand JSON</button></div><pre id=\"matchSummary\" style=\"display:none;\">Run a single match to see turn-by-turn legality.</pre><div id=\"openingState\" class=\"muted\"></div><div class=\"muted\">Round page: <button onclick=\"prevRoundPage()\">Prev</button> <button onclick=\"nextRoundPage()\">Next</button> <span id=\"roundPageInfo\">-</span> <label style=\"display:inline;margin-left:8px;\"><input style=\"width:auto;\" id=\"showDecisionSteps\" type=\"checkbox\" onchange=\"renderRoundPage()\"/> Show decision prompts</label></div><table><thead><tr><th>Step</th><th>Round</th><th>Phase</th><th>Player</th><th>Kind</th><th>Action</th><th>Card</th><th>Legal?</th><th>Initiative</th><th>P1 Resources</th><th>P2 Resources</th><th>Board State</th></tr></thead><tbody id=\"matchTbody\"></tbody></table></div>
@@ -109,6 +192,8 @@ let currentRoundPage = 0;
 let matchSummaryCollapsed = true;
 const cardArtCache = new Map();
 let hoverSession = 0;
+let currentMlJobId = '';
+let mlRefreshTimer = null;
 
 function loadMatchPrefs(){
   try{
@@ -138,12 +223,14 @@ function persistMatchPrefs(){
     deck_b_id:document.getElementById('deckB')?.value||'',
     min_cards:document.getElementById('matchMinCards')?.value||'',
     policy:document.getElementById('matchPolicy')?.value||'',
+    mcts_iterations:document.getElementById('matchMctsIterations')?.value||'',
+    mcts_max_depth:document.getElementById('matchMctsDepth')?.value||'',
     seed:document.getElementById('matchSeed')?.value||'',
   };
   try{localStorage.setItem(MATCH_PREFS_KEY,JSON.stringify(payload));}catch(_e){}
 }
 function initMatchPrefBindings(){
-  ['deckA','deckB','matchMinCards','matchPolicy','matchSeed'].forEach(id=>{
+  ['deckA','deckB','matchMinCards','matchPolicy','matchMctsIterations','matchMctsDepth','matchSeed'].forEach(id=>{
     const el=document.getElementById(id);
     if(!el) return;
     el.addEventListener('change',persistMatchPrefs);
@@ -157,7 +244,29 @@ async function api(path, opts={}){
   if(!r.ok)throw new Error(d.error||t||r.statusText);
   return d;
 }
-async function refreshAll(){const s=await api('/api/state');renderDecks(s.decks);renderSims(s.simulations);renderCandidates(s.decks);renderMatchDecks(s.decks);document.getElementById('settings').textContent=JSON.stringify(s.settings,null,2);}
+async function refreshAll(){
+  const s=await api('/api/state');
+  renderDecks(s.decks);
+  renderSims(s.simulations);
+  renderCandidates(s.decks);
+  renderMatchDecks(s.decks);
+  const rt=document.getElementById('howToRuntime');
+  if(rt){
+    const set=s.settings||{};
+    const lines=[
+      `cwd: ${set.cwd||'-'}`,
+      `python: ${set.python_executable||'-'}`,
+      `php_bin: ${set.php_bin||'-'}`,
+      `php_available: ${Boolean(set.php_available)}`,
+      `CUDA_VISIBLE_DEVICES: ${set.cuda_visible_devices||'(not set)'}`,
+      `decks_file: ${set.decks_file||'-'}`,
+      `sims_file: ${set.sims_file||'-'}`,
+    ];
+    rt.textContent=lines.join('\\n');
+  }
+  await refreshMlInfo();
+  await refreshMlJobs();
+}
 function setMatchSummaryCollapsed(collapsed){
   matchSummaryCollapsed=Boolean(collapsed);
   const summary=document.getElementById('matchSummary');
@@ -174,8 +283,26 @@ function initUiState(){
   const collapsed=(stored===null)?true:(stored==='1');
   setMatchSummaryCollapsed(collapsed);
 }
-function fill(sel,decks,filter){sel.innerHTML='';decks.filter(filter).forEach(d=>{const o=document.createElement('option');o.value=d.deck_id;o.textContent=`${d.deck_id} :: ${d.name}`;sel.appendChild(o);});}
-function renderCandidates(decks){fill(document.getElementById('candidate'),decks,d=>d.pool==='candidate');}
+function fill(sel,decks,filter){
+  if(!sel) return;
+  sel.innerHTML='';
+  decks.filter(filter).forEach(d=>{
+    const o=document.createElement('option');
+    o.value=d.deck_id;
+    o.textContent=`${d.deck_id} :: ${d.name}`;
+    sel.appendChild(o);
+  });
+}
+function fillCandidateSelect(id,decks){
+  const el=document.getElementById(id);
+  if(!el) return;
+  const prev=el.value||'';
+  fill(el,decks,d=>d.pool==='candidate');
+  if(!setSelectValueIfPresent(el,prev) && el.options.length>0) el.selectedIndex=0;
+}
+function renderCandidates(decks){
+  ['candidate','mlSimCandidate','mlCollectCandidate'].forEach(id=>fillCandidateSelect(id,decks));
+}
 function renderMatchDecks(decks){
   const deckA=document.getElementById('deckA');
   const deckB=document.getElementById('deckB');
@@ -188,15 +315,256 @@ function renderMatchDecks(decks){
   if(!setSelectValueIfPresent(deckB,prevB)) setSelectValueIfPresent(deckB,prefs.deck_b_id);
   setSelectValueIfPresent(document.getElementById('matchMinCards'),prefs.min_cards);
   setSelectValueIfPresent(document.getElementById('matchPolicy'),prefs.policy);
+  const mctsIterationsInput=document.getElementById('matchMctsIterations');
+  if(mctsIterationsInput && String(prefs.mcts_iterations||'').trim()!=='') mctsIterationsInput.value=String(prefs.mcts_iterations);
+  const mctsDepthInput=document.getElementById('matchMctsDepth');
+  if(mctsDepthInput && String(prefs.mcts_max_depth||'').trim()!=='') mctsDepthInput.value=String(prefs.mcts_max_depth);
   const seedInput=document.getElementById('matchSeed');
   if(seedInput && String(prefs.seed||'').trim()!=='') seedInput.value=String(prefs.seed);
 }
-function renderDecks(decks){const tb=document.getElementById('decksTbody');tb.innerHTML='';decks.forEach(d=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${d.deck_id}</td><td>${d.pool}</td><td>${d.name}</td><td>${d.deck_size}</td><td><button onclick=\"showDeck('${d.deck_id}')\">View</button></td>`;tb.appendChild(tr);});}
-function renderSims(sims){const tb=document.getElementById('simsTbody');tb.innerHTML='';sims.forEach(s=>{const tr=document.createElement('tr');const wr=((s.overall?.win_rate||0)*100).toFixed(2)+'%';tr.innerHTML=`<td>${s.sim_id}</td><td>${s.candidate_deck_id}</td><td>${wr}</td><td>${s.overall?.games||0}</td><td><button onclick=\"showSim('${s.sim_id}')\">Analyze</button></td>`;tb.appendChild(tr);});}
+function renderDecks(decks){const tb=document.getElementById('decksTbody');tb.innerHTML='';decks.forEach(d=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${d.deck_id}</td><td>${d.pool}</td><td>${d.name}</td><td>${d.deck_size}</td><td><button onclick=\"showDeck('${d.deck_id}')\">View</button> <button onclick=\"deleteDeck('${d.deck_id}')\" style=\"background:#b91c1c;border-color:#b91c1c\">Remove</button></td>`;tb.appendChild(tr);});}
+function renderSims(sims){const tb=document.getElementById('simsTbody');tb.innerHTML='';sims.forEach(s=>{const tr=document.createElement('tr');const wr=((s.overall?.win_rate||0)*100).toFixed(2)+'%';const illegal=Number(s.overall?.illegal_actions||0);tr.innerHTML=`<td>${s.sim_id}</td><td>${s.candidate_deck_id}</td><td>${wr}</td><td>${s.overall?.games||0}</td><td>${illegal}</td><td><button onclick=\"showSim('${s.sim_id}')\">Analyze</button></td>`;tb.appendChild(tr);});}
 async function uploadDeck(){const msg=document.getElementById('uploadMsg');msg.textContent='Uploading...';try{await api('/api/decks',{method:'POST',body:JSON.stringify({deck_id:document.getElementById('deckId').value||null,pool:document.getElementById('pool').value,swudb:JSON.parse(document.getElementById('deckJson').value)})});msg.textContent='Uploaded';await refreshAll();}catch(e){msg.textContent='Error: '+e.message;}}
-async function createSimulation(){const msg=document.getElementById('simMsg');msg.textContent='Running...';try{const out=await api('/api/simulations',{method:'POST',body:JSON.stringify({candidate:document.getElementById('candidate').value,opponents:document.getElementById('opponents').value,min_cards:parseInt(document.getElementById('simMinCards').value||'50',10),games:parseInt(document.getElementById('games').value||'20',10),seed:parseInt(document.getElementById('seed').value||'42',10),workers:parseInt(document.getElementById('workers').value||'4',10),php_script:document.getElementById('phpScript').value||null,sim_id:document.getElementById('simId').value||null})});msg.textContent='Created '+out.sim_id;await refreshAll();await showSim(out.sim_id);}catch(e){msg.textContent='Error: '+e.message;}}
+async function deleteDeck(id){
+  if(!id) return;
+  const ok=window.confirm(`Delete deck '${id}' from local list?`);
+  if(!ok) return;
+  const msg=document.getElementById('uploadMsg');
+  msg.textContent='Deleting...';
+  try{
+    await api('/api/decks/'+encodeURIComponent(id),{method:'DELETE'});
+    msg.textContent='Deleted '+id;
+    const deckView=document.getElementById('deckView');
+    if(deckView) deckView.textContent='Select a deck to view SWUDB JSON.';
+    await refreshAll();
+  }catch(e){
+    msg.textContent='Error: '+e.message;
+  }
+}
+async function createSimulation(){const msg=document.getElementById('simMsg');msg.textContent='Running...';try{const out=await api('/api/simulations',{method:'POST',body:JSON.stringify({candidate:document.getElementById('candidate').value,opponents:document.getElementById('opponents').value,min_cards:parseInt(document.getElementById('simMinCards').value||'50',10),policy:document.getElementById('simPolicy').value||'random_legal',mcts_iterations:parseInt(document.getElementById('simMctsIterations').value||'16',10),mcts_max_depth:parseInt(document.getElementById('simMctsDepth').value||'14',10),games:parseInt(document.getElementById('games').value||'20',10),seed:parseInt(document.getElementById('seed').value||'42',10),workers:parseInt(document.getElementById('workers').value||'4',10),php_script:document.getElementById('phpScript').value||null,sim_id:document.getElementById('simId').value||null})});msg.textContent='Created '+out.sim_id;await refreshAll();await showSim(out.sim_id);}catch(e){msg.textContent='Error: '+e.message;}}
 async function showDeck(id){const d=await api('/api/decks/'+encodeURIComponent(id));document.getElementById('deckView').textContent=JSON.stringify(d.swudb,null,2);}
-async function showSim(id){const d=await api('/api/simulations/'+encodeURIComponent(id)+'/analysis');document.getElementById('analysis').textContent=d.text;}
+function renderSimulationIllegalAudit(sim){
+  const summary=document.getElementById('simIllegalSummary');
+  const tbody=document.getElementById('simIllegalTbody');
+  if(!summary||!tbody) return;
+  const audit=(sim&&typeof sim==='object'&&sim.illegal_move_audit&&typeof sim.illegal_move_audit==='object')?sim.illegal_move_audit:{};
+  const rows=Array.isArray(audit.rows)?audit.rows:[];
+  const total=Number(audit.total_illegal_actions||0);
+  const matches=Number(audit.matches_with_illegal||0);
+  const actionPairs=Object.entries(audit.by_action_type||{}).sort((a,b)=>Number(b[1])-Number(a[1]));
+  const topActions=(actionPairs.slice(0,6).map(([k,v])=>`${k}:${v}`).join(', '))||'-';
+  summary.textContent=`Illegal actions: ${total} across ${matches} matches | Top action types: ${topActions}`;
+  tbody.innerHTML='';
+  if(rows.length===0){
+    const tr=document.createElement('tr');
+    tr.innerHTML='<td colspan=\"10\" class=\"muted\">No illegal moves were recorded for this simulation.</td>';
+    tbody.appendChild(tr);
+    return;
+  }
+  rows.forEach(r=>{
+    const tr=document.createElement('tr');
+    const legal=Object.entries(r.legal_actions_by_type||{}).sort((a,b)=>String(a[0]).localeCompare(String(b[0]))).map(([k,v])=>`${k}:${v}`).join(', ');
+    const actionType=String(r.action_type||'');
+    const actionChoice=String(r.action_choice||'');
+    const actionCell=actionChoice!==''?`${actionType}:${actionChoice}`:actionType;
+    tr.innerHTML=`<td>${r.match_id}</td><td>${r.opponent_deck_id}</td><td>${r.step}</td><td>${r.round}</td><td>${r.phase}</td><td>${r.player}</td><td>${actionCell}</td><td>${r.card_id||r.card_raw_id||'-'}</td><td>${r.message||''}</td><td>${legal||'-'}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+async function showSim(id){const d=await api('/api/simulations/'+encodeURIComponent(id)+'/analysis');document.getElementById('analysis').textContent=d.text;renderSimulationIllegalAudit(d.raw||{});}
+
+function inputValue(id){return String(document.getElementById(id)?.value||'').trim();}
+function inputInt(id,fallback){
+  const raw=inputValue(id);
+  if(raw==='') return fallback;
+  const parsed=parseInt(raw,10);
+  return Number.isFinite(parsed)?parsed:fallback;
+}
+function inputFloat(id,fallback){
+  const raw=inputValue(id);
+  if(raw==='') return fallback;
+  const parsed=parseFloat(raw);
+  return Number.isFinite(parsed)?parsed:fallback;
+}
+function formatLocal(ts){
+  const v=String(ts||'').trim();
+  if(v==='') return '-';
+  const d=new Date(v);
+  if(Number.isNaN(d.getTime())) return v;
+  return d.toLocaleString();
+}
+function renderRlArtifactLists(artifacts){
+  const ds=document.getElementById('mlDatasetList');
+  const vs=document.getElementById('mlVocabList');
+  if(ds) ds.innerHTML='';
+  if(vs) vs.innerHTML='';
+  (Array.isArray(artifacts)?artifacts:[]).forEach(a=>{
+    const p=String(a?.path||'');
+    if(p==='') return;
+    if(ds && p.endsWith('.jsonl')){
+      const o=document.createElement('option');
+      o.value=p;
+      ds.appendChild(o);
+    }
+    if(vs && p.endsWith('.vocab.json')){
+      const o=document.createElement('option');
+      o.value=p;
+      vs.appendChild(o);
+    }
+  });
+}
+function renderMlInfo(info){
+  const box=document.getElementById('mlInfo');
+  if(!box) return;
+  const gpus=Array.isArray(info?.gpus)?info.gpus:[];
+  const gpuLine=gpus.length
+    ? gpus.map(g=>`GPU ${g.index}: ${g.name} (${g.memory_total_mb} MB)`).join(' | ')
+    : String(info?.gpu_error||'No GPUs detected by nvidia-smi');
+  const visible=String(info?.cuda_visible_devices||'all');
+  const py=String(info?.python_executable||'python');
+  box.textContent=`Python: ${py} | CUDA_VISIBLE_DEVICES: ${visible} | ${gpuLine}`;
+  renderRlArtifactLists(info?.rl_artifacts||[]);
+}
+function renderMlJobs(jobs){
+  const tb=document.getElementById('mlJobsTbody');
+  if(!tb) return;
+  tb.innerHTML='';
+  const rows=Array.isArray(jobs)?jobs:[];
+  if(rows.length===0){
+    const tr=document.createElement('tr');
+    tr.innerHTML='<td colspan=\"8\" class=\"muted\">No ML jobs yet.</td>';
+    tb.appendChild(tr);
+    return;
+  }
+  rows.forEach(j=>{
+    const tr=document.createElement('tr');
+    const jid=String(j.job_id||'');
+    const status=String(j.status||'unknown');
+    const gpu=String(j.gpu_devices||'');
+    const isActive=(status==='queued' || status==='running' || status==='stopping');
+    const stopBtn=isActive?`<button style=\"background:#b91c1c;border-color:#b91c1c\" onclick=\"stopMlJob('${jid}')\">Stop</button>`:'';
+    tr.innerHTML=`<td>${jid}</td><td>${j.job_type||''}</td><td>${status}</td><td>${gpu||'-'}</td><td>${formatLocal(j.started_at)}</td><td>${formatLocal(j.ended_at)}</td><td>${j.exit_code===null?'-':j.exit_code}</td><td><button onclick=\"viewMlJob('${jid}')\">View</button> ${stopBtn}</td>`;
+    tb.appendChild(tr);
+  });
+}
+async function refreshMlInfo(){
+  try{
+    const out=await api('/api/ml/info');
+    renderMlInfo(out);
+  }catch(e){
+    const box=document.getElementById('mlInfo');
+    if(box) box.textContent='ML info unavailable: '+e.message;
+  }
+}
+async function refreshMlJobs(){
+  try{
+    const out=await api('/api/ml/jobs');
+    renderMlJobs(out.jobs||[]);
+    if(currentMlJobId!==''){
+      await viewMlJob(currentMlJobId,false);
+    }
+  }catch(_e){}
+}
+async function viewMlJob(jobId,focus=true){
+  if(!jobId) return;
+  try{
+    const out=await api('/api/ml/jobs/'+encodeURIComponent(jobId));
+    const job=out.job||{};
+    currentMlJobId=String(job.job_id||jobId);
+    const meta=document.getElementById('mlJobMeta');
+    const logs=document.getElementById('mlJobLogs');
+    if(meta){
+      const cmd=Array.isArray(job.command)?job.command.join(' '):'';
+      meta.textContent=`${job.job_id||jobId} | ${job.job_type||''} | status=${job.status||''} | exit=${job.exit_code===null?'-':job.exit_code} | ${cmd}`;
+    }
+    if(logs){
+      const lines=Array.isArray(job.logs)?job.logs:[];
+      logs.textContent=lines.join('\n') || '(no logs yet)';
+      if(focus) logs.scrollTop=logs.scrollHeight;
+    }
+  }catch(e){
+    const logs=document.getElementById('mlJobLogs');
+    if(logs) logs.textContent='Error loading job '+jobId+': '+e.message;
+  }
+}
+async function launchMlJob(payload,msgId){
+  const msg=document.getElementById(msgId);
+  if(msg) msg.textContent='Starting job...';
+  try{
+    const out=await api('/api/ml/jobs',{method:'POST',body:JSON.stringify(payload||{})});
+    const job=out.job||{};
+    if(msg) msg.textContent=`Started ${job.job_id||''}`;
+    await refreshMlJobs();
+    if(job.job_id) await viewMlJob(job.job_id);
+  }catch(e){
+    if(msg) msg.textContent='Error: '+e.message;
+  }
+}
+async function stopMlJob(jobId){
+  if(!jobId) return;
+  try{
+    await api('/api/ml/jobs/'+encodeURIComponent(jobId)+'/stop',{method:'POST',body:'{}'});
+    await refreshMlJobs();
+    await viewMlJob(jobId,false);
+  }catch(e){
+    const logs=document.getElementById('mlJobLogs');
+    if(logs) logs.textContent='Stop request failed: '+e.message;
+  }
+}
+function startMlSimJob(){
+  launchMlJob({
+    job_type: inputValue('mlSimKind') || 'sim_create',
+    candidate: inputValue('mlSimCandidate'),
+    opponents: inputValue('mlSimOpponents') || 'all',
+    min_cards: inputInt('mlSimMinCards',50),
+    policy: inputValue('mlSimPolicy') || 'random_legal',
+    policies: inputValue('mlSimPolicies') || 'random_legal,heuristic,mcts',
+    mcts_iterations: inputInt('mlSimMctsIterations',24),
+    mcts_max_depth: inputInt('mlSimMctsDepth',18),
+    games: inputInt('mlSimGames',30),
+    seed: inputInt('mlSimSeed',123),
+    workers: inputInt('mlSimWorkers',6),
+    gpu_devices: inputValue('mlSimGpuDevices'),
+    php_script: inputValue('mlSimPhpScript'),
+    sim_id: inputValue('mlSimId'),
+    out_json: inputValue('mlShootoutOutJson'),
+  },'mlSimMsg');
+}
+function startMlCollectJob(){
+  launchMlJob({
+    job_type: 'rl_collect',
+    candidate: inputValue('mlCollectCandidate'),
+    opponents: inputValue('mlCollectOpponents') || 'all',
+    min_cards: inputInt('mlCollectMinCards',50),
+    policies: inputValue('mlCollectPolicies') || 'heuristic,mcts',
+    mcts_iterations: inputInt('mlCollectMctsIterations',24),
+    mcts_max_depth: inputInt('mlCollectMctsDepth',18),
+    games: inputInt('mlCollectGames',25),
+    seed: inputInt('mlCollectSeed',123),
+    workers: inputInt('mlCollectWorkers',6),
+    hash_dim: inputInt('mlCollectHashDim',256),
+    gpu_devices: inputValue('mlCollectGpuDevices'),
+    output_prefix: inputValue('mlCollectOutputPrefix'),
+  },'mlCollectMsg');
+}
+function startMlTrainJob(){
+  launchMlJob({
+    job_type: 'rl_train',
+    dataset: inputValue('mlTrainDataset'),
+    vocab: inputValue('mlTrainVocab'),
+    model_out: inputValue('mlTrainModelOut'),
+    device: inputValue('mlTrainDevice') || 'auto',
+    gpu_devices: inputValue('mlTrainGpuDevices'),
+    epochs: inputInt('mlTrainEpochs',12),
+    batch_size: inputInt('mlTrainBatchSize',512),
+    lr: inputFloat('mlTrainLr',0.001),
+    weight_decay: inputFloat('mlTrainWeightDecay',0.00001),
+    val_split: inputFloat('mlTrainValSplit',0.1),
+    hidden_dim: inputInt('mlTrainHiddenDim',256),
+    hidden_layers: inputInt('mlTrainHiddenLayers',2),
+    dropout: inputFloat('mlTrainDropout',0.1),
+  },'mlTrainMsg');
+}
 
 function isRenderableEvent(e){return !!e && typeof e==='object' && Number.isFinite(Number(e.step));}
 function isDecisionEvent(e){const t=String(e?.action?.type||'');return Boolean(e?.is_decision) || DECISION_TYPES.has(t);}
@@ -1353,7 +1721,7 @@ async function runSingleMatch(){
   msg.textContent='Running match...';
   opening.textContent='';
   try{
-    const d=await api('/api/match/run',{method:'POST',body:JSON.stringify({deck_a_id:document.getElementById('deckA').value,deck_b_id:document.getElementById('deckB').value,min_cards:parseInt(document.getElementById('matchMinCards').value||'50',10),policy:document.getElementById('matchPolicy').value,seed:parseInt(document.getElementById('matchSeed').value||'123',10)})});
+    const d=await api('/api/match/run',{method:'POST',body:JSON.stringify({deck_a_id:document.getElementById('deckA').value,deck_b_id:document.getElementById('deckB').value,min_cards:parseInt(document.getElementById('matchMinCards').value||'50',10),policy:document.getElementById('matchPolicy').value,mcts_iterations:parseInt(document.getElementById('matchMctsIterations').value||'16',10),mcts_max_depth:parseInt(document.getElementById('matchMctsDepth').value||'14',10),seed:parseInt(document.getElementById('matchSeed').value||'123',10)})});
     msg.textContent='Done';
     document.getElementById('matchSummary').textContent=JSON.stringify(d.summary,null,2);
     document.getElementById('showDecisionSteps').checked=false;
@@ -1385,6 +1753,9 @@ window.addEventListener('resize', hideCardHover);
 document.addEventListener('mouseleave', hideCardHover);
 document.addEventListener('visibilitychange', ()=>{if(document.hidden) hideCardHover();});
 refreshAll();
+if(mlRefreshTimer===null){
+  mlRefreshTimer=setInterval(()=>{refreshMlJobs();},2000);
+}
 </script></body></html>
 """
 
@@ -1402,10 +1773,23 @@ def _deck_to_json(deck: cli.DeckRecord) -> dict[str, Any]:
 
 def _simulation_analysis_text(sim: dict[str, Any]) -> str:
     rows = sim.get("opponents", [])
+    overall = sim.get("overall", {})
+    audit = sim.get("illegal_move_audit", {})
+    illegal_actions = int(overall.get("illegal_actions", audit.get("total_illegal_actions", 0)))
+    matches_with_illegal = int(overall.get("matches_with_illegal", audit.get("matches_with_illegal", 0)))
+    by_action = audit.get("by_action_type", {})
+    top_illegal_actions = "-"
+    if isinstance(by_action, dict) and by_action:
+        top_illegal_actions = ", ".join(
+            f"{k}:{v}" for k, v in sorted(by_action.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))[:6]
+        )
     lines = [
         f"Simulation: {sim['sim_id']}",
         f"Candidate: {sim['candidate_deck_id']} :: {sim['candidate_name']}",
+        f"Policy: {sim.get('policy', 'random_legal')}",
         f"Overall win rate: {sim['overall']['win_rate']:.2%} ({sim['overall']['wins']}/{sim['overall']['games']})",
+        f"Illegal actions: {illegal_actions} across {matches_with_illegal} matches",
+        f"Top illegal action types: {top_illegal_actions}",
         "",
         "By tier:",
     ]
@@ -1432,6 +1816,8 @@ def _run_single_match(
     seed: int,
     max_actions: int | None,
     policy: str,
+    mcts_iterations: int | None = None,
+    mcts_max_depth: int | None = None,
 ) -> dict[str, Any]:
     php_bin = runner.resolve_php_bin()
     if not php_bin:
@@ -1454,6 +1840,10 @@ def _run_single_match(
         "--policy",
         policy,
     ]
+    if mcts_iterations is not None and int(mcts_iterations) > 0:
+        cmd.extend(["--mcts-iterations", str(int(mcts_iterations))])
+    if mcts_max_depth is not None and int(mcts_max_depth) > 0:
+        cmd.extend(["--mcts-max-depth", str(int(mcts_max_depth))])
     if max_actions is not None and int(max_actions) > 0:
         cmd.extend(["--max-actions", str(int(max_actions))])
     env = dict(os.environ)
@@ -1533,6 +1923,523 @@ def _extract_runner_error(stdout: str, stderr: str) -> str:
         f"stderr={stderr[:500] or '<empty>'} "
         f"stdout={stdout[:500] or '<empty>'}"
     )
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_int_field(payload: dict[str, Any], field: str, default: int, minimum: int | None = None) -> int:
+    raw = payload.get(field, default)
+    value = int(raw)
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{field} must be >= {minimum}")
+    return value
+
+
+def _parse_float_field(payload: dict[str, Any], field: str, default: float, minimum: float | None = None) -> float:
+    raw = payload.get(field, default)
+    value = float(raw)
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{field} must be >= {minimum}")
+    return value
+
+
+def _optional_text(payload: dict[str, Any], field: str) -> str | None:
+    value = str(payload.get(field, "")).strip()
+    return value if value else None
+
+
+def _gpu_env_updates(payload: dict[str, Any]) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    gpu_devices = _optional_text(payload, "gpu_devices")
+    if gpu_devices:
+        updates["CUDA_VISIBLE_DEVICES"] = gpu_devices
+        updates["NVIDIA_VISIBLE_DEVICES"] = gpu_devices
+    return updates
+
+
+def _build_ml_job_command(payload: dict[str, Any]) -> tuple[str, list[str], dict[str, str]]:
+    job_type = str(payload.get("job_type", "")).strip()
+    if not job_type:
+        raise ValueError("job_type is required")
+    python_bin = str(os.environ.get("PYTHON_BIN", "")).strip() or sys.executable
+    cmd = [python_bin, "-m", "sim_harness.cli"]
+    env_updates = _gpu_env_updates(payload)
+
+    if job_type == "sim_create":
+        candidate = str(payload.get("candidate", "")).strip()
+        if not candidate:
+            raise ValueError("candidate is required for sim_create")
+        opponents = str(payload.get("opponents", "all")).strip()
+        if opponents not in {"all", "meta", "starter"}:
+            raise ValueError("opponents must be all/meta/starter")
+        min_cards = cli._coerce_min_cards(payload.get("min_cards", cli.DEFAULT_MIN_DECK_SIZE))
+        policy = str(payload.get("policy", "random_legal")).strip()
+        if policy not in cli.SUPPORTED_POLICIES:
+            allowed = ", ".join(cli.SUPPORTED_POLICIES)
+            raise ValueError(f"policy must be one of: {allowed}")
+        games = _parse_int_field(payload, "games", 20, minimum=1)
+        seed = _parse_int_field(payload, "seed", 42)
+        workers = _parse_int_field(payload, "workers", 4, minimum=1)
+        mcts_iterations = _parse_int_field(payload, "mcts_iterations", 16, minimum=1)
+        mcts_max_depth = _parse_int_field(payload, "mcts_max_depth", 14, minimum=1)
+        cmd.extend([
+            "sim",
+            "create",
+            "--candidate",
+            candidate,
+            "--opponents",
+            opponents,
+            "--min-cards",
+            str(min_cards),
+            "--policy",
+            policy,
+            "--games",
+            str(games),
+            "--seed",
+            str(seed),
+            "--workers",
+            str(workers),
+            "--mcts-iterations",
+            str(mcts_iterations),
+            "--mcts-max-depth",
+            str(mcts_max_depth),
+        ])
+        php_script = _optional_text(payload, "php_script")
+        if php_script:
+            cmd.extend(["--php-script", php_script])
+        sim_id = _optional_text(payload, "sim_id")
+        if sim_id:
+            cmd.extend(["--sim-id", sim_id])
+        return job_type, cmd, env_updates
+
+    if job_type == "sim_shootout":
+        candidate = str(payload.get("candidate", "")).strip()
+        if not candidate:
+            raise ValueError("candidate is required for sim_shootout")
+        opponents = str(payload.get("opponents", "all")).strip()
+        if opponents not in {"all", "meta", "starter"}:
+            raise ValueError("opponents must be all/meta/starter")
+        min_cards = cli._coerce_min_cards(payload.get("min_cards", cli.DEFAULT_MIN_DECK_SIZE))
+        games = _parse_int_field(payload, "games", 30, minimum=1)
+        seed = _parse_int_field(payload, "seed", 123)
+        workers = _parse_int_field(payload, "workers", 6, minimum=1)
+        mcts_iterations = _parse_int_field(payload, "mcts_iterations", 24, minimum=1)
+        mcts_max_depth = _parse_int_field(payload, "mcts_max_depth", 18, minimum=1)
+        policies = str(payload.get("policies", "random_legal,heuristic,mcts")).strip()
+        cli._parse_policy_list(policies)
+        cmd.extend([
+            "sim",
+            "shootout",
+            "--candidate",
+            candidate,
+            "--opponents",
+            opponents,
+            "--min-cards",
+            str(min_cards),
+            "--games",
+            str(games),
+            "--seed",
+            str(seed),
+            "--workers",
+            str(workers),
+            "--policies",
+            policies,
+            "--mcts-iterations",
+            str(mcts_iterations),
+            "--mcts-max-depth",
+            str(mcts_max_depth),
+        ])
+        php_script = _optional_text(payload, "php_script")
+        if php_script:
+            cmd.extend(["--php-script", php_script])
+        out_json = _optional_text(payload, "out_json")
+        if out_json:
+            cmd.extend(["--out-json", out_json])
+        return job_type, cmd, env_updates
+
+    if job_type == "rl_collect":
+        candidate = str(payload.get("candidate", "")).strip()
+        if not candidate:
+            raise ValueError("candidate is required for rl_collect")
+        opponents = str(payload.get("opponents", "all")).strip()
+        if opponents not in {"all", "meta", "starter"}:
+            raise ValueError("opponents must be all/meta/starter")
+        min_cards = cli._coerce_min_cards(payload.get("min_cards", cli.DEFAULT_MIN_DECK_SIZE))
+        games = _parse_int_field(payload, "games", 25, minimum=1)
+        seed = _parse_int_field(payload, "seed", 123)
+        workers = _parse_int_field(payload, "workers", 6, minimum=1)
+        mcts_iterations = _parse_int_field(payload, "mcts_iterations", 24, minimum=1)
+        mcts_max_depth = _parse_int_field(payload, "mcts_max_depth", 18, minimum=1)
+        hash_dim = _parse_int_field(payload, "hash_dim", 256, minimum=8)
+        policies = str(payload.get("policies", "heuristic,mcts")).strip()
+        cli._parse_policy_list(policies)
+        cmd.extend([
+            "rl",
+            "collect",
+            "--candidate",
+            candidate,
+            "--opponents",
+            opponents,
+            "--min-cards",
+            str(min_cards),
+            "--games",
+            str(games),
+            "--seed",
+            str(seed),
+            "--workers",
+            str(workers),
+            "--policies",
+            policies,
+            "--mcts-iterations",
+            str(mcts_iterations),
+            "--mcts-max-depth",
+            str(mcts_max_depth),
+            "--hash-dim",
+            str(hash_dim),
+        ])
+        output_prefix = _optional_text(payload, "output_prefix")
+        if output_prefix:
+            cmd.extend(["--output-prefix", output_prefix])
+        php_script = _optional_text(payload, "php_script")
+        if php_script:
+            cmd.extend(["--php-script", php_script])
+        return job_type, cmd, env_updates
+
+    if job_type == "rl_train":
+        dataset = str(payload.get("dataset", "")).strip()
+        vocab = str(payload.get("vocab", "")).strip()
+        model_out = str(payload.get("model_out", "")).strip()
+        if not dataset:
+            raise ValueError("dataset is required for rl_train")
+        if not vocab:
+            raise ValueError("vocab is required for rl_train")
+        if not model_out:
+            raise ValueError("model_out is required for rl_train")
+        epochs = _parse_int_field(payload, "epochs", 12, minimum=1)
+        batch_size = _parse_int_field(payload, "batch_size", 512, minimum=1)
+        hidden_dim = _parse_int_field(payload, "hidden_dim", 256, minimum=16)
+        hidden_layers = _parse_int_field(payload, "hidden_layers", 2, minimum=1)
+        seed = _parse_int_field(payload, "seed", 42)
+        lr = _parse_float_field(payload, "lr", 1e-3, minimum=0.0)
+        weight_decay = _parse_float_field(payload, "weight_decay", 1e-5, minimum=0.0)
+        val_split = _parse_float_field(payload, "val_split", 0.1, minimum=0.0)
+        dropout = _parse_float_field(payload, "dropout", 0.1, minimum=0.0)
+        value_loss_weight = _parse_float_field(payload, "value_loss_weight", 1.0, minimum=0.0)
+        device = str(payload.get("device", "auto")).strip().lower() or "auto"
+        if device not in {"auto", "cpu", "cuda"}:
+            raise ValueError("device must be auto/cpu/cuda")
+        cmd.extend([
+            "rl",
+            "train",
+            "--dataset",
+            dataset,
+            "--vocab",
+            vocab,
+            "--model-out",
+            model_out,
+            "--epochs",
+            str(epochs),
+            "--batch-size",
+            str(batch_size),
+            "--lr",
+            str(lr),
+            "--weight-decay",
+            str(weight_decay),
+            "--val-split",
+            str(val_split),
+            "--hidden-dim",
+            str(hidden_dim),
+            "--hidden-layers",
+            str(hidden_layers),
+            "--dropout",
+            str(dropout),
+            "--value-loss-weight",
+            str(value_loss_weight),
+            "--seed",
+            str(seed),
+            "--device",
+            device,
+        ])
+        return job_type, cmd, env_updates
+
+    raise ValueError(
+        "job_type must be one of: sim_create, sim_shootout, rl_collect, rl_train"
+    )
+
+
+def _detect_gpus() -> tuple[list[dict[str, Any]], str]:
+    try:
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,memory.total,driver_version",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except FileNotFoundError:
+        return [], "nvidia-smi not found in this container."
+    except Exception as exc:  # noqa: BLE001
+        return [], str(exc)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        return [], err or "nvidia-smi returned a non-zero exit code."
+    rows: list[dict[str, Any]] = []
+    for line in (proc.stdout or "").splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        parts = [p.strip() for p in text.split(",")]
+        if len(parts) < 4:
+            continue
+        rows.append(
+            {
+                "index": parts[0],
+                "name": parts[1],
+                "memory_total_mb": parts[2],
+                "driver_version": parts[3],
+            }
+        )
+    return rows, ""
+
+
+def _list_rl_artifacts(limit: int = 200) -> list[dict[str, Any]]:
+    base = cli.DATA_DIR / "rl"
+    if not base.exists():
+        return []
+    allowed_suffixes = {".jsonl", ".pt", ".pth"}
+    artifacts: list[dict[str, Any]] = []
+    files = sorted(base.rglob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in files:
+        if not path.is_file():
+            continue
+        name = path.name
+        if path.suffix.lower() not in allowed_suffixes and not name.endswith(".vocab.json") and not name.endswith(".meta.json"):
+            continue
+        stat = path.stat()
+        artifacts.append(
+            {
+                "path": str(path),
+                "name": name,
+                "size_bytes": int(stat.st_size),
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            }
+        )
+        if len(artifacts) >= limit:
+            break
+    return artifacts
+
+
+class MlJobManager:
+    def __init__(self, max_jobs: int = 80, max_log_lines: int = 4000) -> None:
+        self._max_jobs = int(max_jobs)
+        self._max_log_lines = int(max_log_lines)
+        self._lock = threading.Lock()
+        self._jobs: dict[str, dict[str, Any]] = {}
+        self._order: list[str] = []
+
+    def _snapshot(self, job: dict[str, Any], include_logs: bool = False, tail: int = 800) -> dict[str, Any]:
+        payload = {
+            "job_id": job["job_id"],
+            "job_type": job["job_type"],
+            "status": job["status"],
+            "created_at": job["created_at"],
+            "updated_at": job["updated_at"],
+            "started_at": job["started_at"],
+            "ended_at": job["ended_at"],
+            "exit_code": job["exit_code"],
+            "pid": job["pid"],
+            "error": job["error"],
+            "command": list(job["command"]),
+            "gpu_devices": job.get("gpu_devices", ""),
+            "stop_requested": bool(job.get("stop_requested", False)),
+        }
+        if include_logs:
+            logs = job.get("logs", [])
+            if tail > 0:
+                payload["logs"] = list(logs[-tail:])
+            else:
+                payload["logs"] = list(logs)
+        return payload
+
+    def _append_log_locked(self, job: dict[str, Any], line: str) -> None:
+        logs = job.setdefault("logs", [])
+        logs.append(line)
+        over = len(logs) - self._max_log_lines
+        if over > 0:
+            del logs[:over]
+
+    def _prune_locked(self) -> None:
+        active = {"queued", "running", "stopping"}
+        while len(self._order) > self._max_jobs:
+            oldest = self._order[0]
+            job = self._jobs.get(oldest)
+            if not job:
+                self._order.pop(0)
+                continue
+            if str(job.get("status")) in active:
+                break
+            self._order.pop(0)
+            self._jobs.pop(oldest, None)
+
+    def create(self, job_type: str, command: list[str], env_updates: dict[str, str]) -> dict[str, Any]:
+        if not command:
+            raise ValueError("job command cannot be empty")
+        now = _now_iso()
+        job_id = f"job-{uuid.uuid4().hex[:10]}"
+        record: dict[str, Any] = {
+            "job_id": job_id,
+            "job_type": job_type,
+            "status": "queued",
+            "created_at": now,
+            "updated_at": now,
+            "started_at": "",
+            "ended_at": "",
+            "exit_code": None,
+            "pid": None,
+            "error": "",
+            "command": list(command),
+            "env_updates": dict(env_updates),
+            "gpu_devices": env_updates.get("CUDA_VISIBLE_DEVICES", ""),
+            "stop_requested": False,
+            "logs": [f"$ {' '.join(shlex.quote(part) for part in command)}"],
+            "_proc": None,
+        }
+        with self._lock:
+            self._jobs[job_id] = record
+            self._order.append(job_id)
+            self._prune_locked()
+        threading.Thread(target=self._run, args=(job_id,), daemon=True).start()
+        with self._lock:
+            return self._snapshot(self._jobs[job_id], include_logs=False)
+
+    def _run(self, job_id: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            if job["status"] != "queued":
+                return
+            job["status"] = "running"
+            job["started_at"] = _now_iso()
+            job["updated_at"] = job["started_at"]
+            command = list(job["command"])
+            env_updates = dict(job.get("env_updates", {}))
+        env = dict(os.environ)
+        env.update(env_updates)
+        env["PYTHONUNBUFFERED"] = "1"
+        proc: subprocess.Popen[str] | None = None
+        try:
+            proc = subprocess.Popen(
+                command,
+                cwd=str(Path.cwd()),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if not job:
+                    return
+                job["_proc"] = proc
+                job["pid"] = int(proc.pid)
+                job["updated_at"] = _now_iso()
+            if proc.stdout is not None:
+                for raw in proc.stdout:
+                    line = raw.rstrip("\r\n")
+                    with self._lock:
+                        job = self._jobs.get(job_id)
+                        if not job:
+                            break
+                        self._append_log_locked(job, line)
+                        job["updated_at"] = _now_iso()
+                        should_stop = bool(job.get("stop_requested"))
+                    if should_stop and proc.poll() is None:
+                        try:
+                            proc.terminate()
+                        except Exception:  # noqa: BLE001
+                            pass
+            code = proc.wait()
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if not job:
+                    return
+                job["exit_code"] = int(code)
+                if bool(job.get("stop_requested")):
+                    job["status"] = "stopped"
+                else:
+                    job["status"] = "succeeded" if int(code) == 0 else "failed"
+                job["ended_at"] = _now_iso()
+                job["updated_at"] = job["ended_at"]
+                job["_proc"] = None
+                self._prune_locked()
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if not job:
+                    return
+                job["status"] = "failed"
+                job["error"] = str(exc)
+                self._append_log_locked(job, f"[runner_error] {exc}")
+                job["exit_code"] = -1
+                job["ended_at"] = _now_iso()
+                job["updated_at"] = job["ended_at"]
+                job["_proc"] = None
+                self._prune_locked()
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def list(self) -> list[dict[str, Any]]:
+        with self._lock:
+            ids = list(self._order)
+            ids.reverse()
+            return [self._snapshot(self._jobs[job_id], include_logs=False) for job_id in ids if job_id in self._jobs]
+
+    def get(self, job_id: str, include_logs: bool = True) -> dict[str, Any]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                raise KeyError(job_id)
+            return self._snapshot(job, include_logs=include_logs)
+
+    def stop(self, job_id: str) -> dict[str, Any]:
+        proc: subprocess.Popen[str] | None = None
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                raise KeyError(job_id)
+            status = str(job.get("status", ""))
+            if status in {"succeeded", "failed", "stopped"}:
+                return self._snapshot(job, include_logs=False)
+            job["stop_requested"] = True
+            job["updated_at"] = _now_iso()
+            if status == "queued":
+                job["status"] = "stopped"
+                job["ended_at"] = job["updated_at"]
+                job["exit_code"] = -15
+            else:
+                job["status"] = "stopping"
+                proc = job.get("_proc")
+            snapshot = self._snapshot(job, include_logs=False)
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        return snapshot
+
+
+ML_JOB_MANAGER = MlJobManager()
 
 
 class SimWebHandler(BaseHTTPRequestHandler):
@@ -1619,10 +2526,37 @@ class SimWebHandler(BaseHTTPRequestHandler):
                         "php_bin": php_bin,
                         "php_available": bool(php_bin),
                         "php_bin_env": os.environ.get("PHP_BIN", ""),
+                        "python_executable": sys.executable,
+                        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
                         "deck_min_cards_default": cli.DEFAULT_MIN_DECK_SIZE,
                         "deck_min_cards_options": sorted(cli.SUPPORTED_MIN_DECK_SIZES),
                     },
                 })
+                return
+            if path == "/api/ml/info":
+                gpus, gpu_error = _detect_gpus()
+                self._send_json(
+                    {
+                        "python_executable": sys.executable,
+                        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+                        "gpus": gpus,
+                        "gpu_error": gpu_error,
+                        "rl_artifacts": _list_rl_artifacts(),
+                    }
+                )
+                return
+            if path == "/api/ml/jobs":
+                self._send_json({"jobs": ML_JOB_MANAGER.list()})
+                return
+            if path.startswith("/api/ml/jobs/"):
+                job_id = path[len("/api/ml/jobs/") :].strip("/")
+                if not job_id:
+                    raise ValueError("job id is required")
+                try:
+                    job = ML_JOB_MANAGER.get(job_id, include_logs=True)
+                except KeyError as exc:
+                    raise ValueError(f"Unknown job id: {job_id}") from exc
+                self._send_json({"job": job})
                 return
             if path.startswith("/api/decks/"):
                 deck_id = path.rsplit("/", 1)[-1]
@@ -1641,6 +2575,22 @@ class SimWebHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         try:
             path = urlparse(self.path).path
+            if path == "/api/ml/jobs":
+                payload = self._read_json()
+                job_type, command, env_updates = _build_ml_job_command(payload)
+                job = ML_JOB_MANAGER.create(job_type=job_type, command=command, env_updates=env_updates)
+                self._send_json({"ok": True, "job": job})
+                return
+            if path.startswith("/api/ml/jobs/") and path.endswith("/stop"):
+                job_id = path[len("/api/ml/jobs/") : -len("/stop")].strip("/")
+                if not job_id:
+                    raise ValueError("job id is required")
+                try:
+                    job = ML_JOB_MANAGER.stop(job_id)
+                except KeyError as exc:
+                    raise ValueError(f"Unknown job id: {job_id}") from exc
+                self._send_json({"ok": True, "job": job})
+                return
             if path == "/api/decks":
                 payload = self._read_json()
                 swudb = payload.get("swudb")
@@ -1662,10 +2612,16 @@ class SimWebHandler(BaseHTTPRequestHandler):
 
             if path == "/api/simulations":
                 payload = self._read_json()
+                policy = str(payload.get("policy", "random_legal"))
+                if policy not in {"random_non_pass", "random_legal", "first_non_pass", "heuristic", "mcts"}:
+                    raise ValueError("policy must be random_non_pass/random_legal/first_non_pass/heuristic/mcts")
                 args = type("Args", (), {
                     "candidate": payload.get("candidate"),
                     "opponents": payload.get("opponents", "all"),
                     "min_cards": cli._coerce_min_cards(payload.get("min_cards", cli.DEFAULT_MIN_DECK_SIZE)),
+                    "policy": policy,
+                    "mcts_iterations": int(payload.get("mcts_iterations", 16)),
+                    "mcts_max_depth": int(payload.get("mcts_max_depth", 14)),
                     "games": int(payload.get("games", 20)),
                     "seed": int(payload.get("seed", 42)),
                     "workers": int(payload.get("workers", 4)),
@@ -1693,9 +2649,19 @@ class SimWebHandler(BaseHTTPRequestHandler):
                     if parsed > 0:
                         max_actions = parsed
                 policy = str(payload.get("policy", "random_legal"))
-                if policy not in {"random_non_pass", "random_legal", "first_non_pass"}:
-                    raise ValueError("policy must be random_non_pass/random_legal/first_non_pass")
-                match = _run_single_match(deck_a, deck_b, seed, max_actions, policy)
+                if policy not in {"random_non_pass", "random_legal", "first_non_pass", "heuristic", "mcts"}:
+                    raise ValueError("policy must be random_non_pass/random_legal/first_non_pass/heuristic/mcts")
+                mcts_iterations = payload.get("mcts_iterations", 16)
+                mcts_max_depth = payload.get("mcts_max_depth", 14)
+                match = _run_single_match(
+                    deck_a,
+                    deck_b,
+                    seed,
+                    max_actions,
+                    policy,
+                    mcts_iterations=int(mcts_iterations) if mcts_iterations is not None else None,
+                    mcts_max_depth=int(mcts_max_depth) if mcts_max_depth is not None else None,
+                )
                 self._send_json({
                     "ok": True,
                     "summary": {
@@ -1714,6 +2680,8 @@ class SimWebHandler(BaseHTTPRequestHandler):
                         "forced_passes": match.get("stats", {}).get("forced_passes", 0),
                         "leader_action_triggers": match.get("stats", {}).get("leader_action_triggers", 0),
                         "epic_action_triggers": match.get("stats", {}).get("epic_action_triggers", 0),
+                        "mcts_iterations": match.get("stats", {}).get("mcts_iterations", 0),
+                        "mcts_max_depth": match.get("stats", {}).get("mcts_max_depth", 0),
                         "action_cap": match.get("stats", {}).get("action_cap"),
                         "terminated_reason": match.get("stats", {}).get("terminated_reason", ""),
                         "game_over": match.get("stats", {}).get("game_over", False),
@@ -1726,6 +2694,20 @@ class SimWebHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+        except Exception as exc:  # noqa: BLE001
+            self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        try:
+            path = urlparse(self.path).path
+            if path.startswith("/api/decks/"):
+                deck_id = path.rsplit("/", 1)[-1]
+                if not deck_id:
+                    raise ValueError("deck id is required")
+                removed = cli._delete_deck(deck_id)
+                self._send_json({"ok": True, "deck_id": removed.deck_id, "name": removed.name})
+                return
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:  # noqa: BLE001
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)

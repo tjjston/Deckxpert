@@ -81,6 +81,9 @@ def run_match(
     seed: int,
     match_id: int = 0,
     php_script: str | None = None,
+    policy: str = "random_legal",
+    mcts_iterations: int | None = None,
+    mcts_max_depth: int | None = None,
 ) -> MatchResult:
     """Run one headless match.
 
@@ -109,7 +112,13 @@ def run_match(
             deck_b_b64,
             "--match-id",
             str(match_id),
+            "--policy",
+            str(policy or "random_legal"),
         ]
+        if mcts_iterations is not None and int(mcts_iterations) > 0:
+            cmd.extend(["--mcts-iterations", str(int(mcts_iterations))])
+        if mcts_max_depth is not None and int(mcts_max_depth) > 0:
+            cmd.extend(["--mcts-max-depth", str(int(mcts_max_depth))])
         env = dict(os.environ)
         env["XDEBUG_MODE"] = "off"
         proc = subprocess.run(cmd, check=False, capture_output=True, text=True, env=env)
@@ -188,9 +197,18 @@ def _extract_runner_error(stdout: str, stderr: str) -> str:
     )
 
 
-def _run_match_job(job: tuple[int, str, str, int, str | None]) -> MatchResult:
-    match_id, deck_a, deck_b, seed, php_script = job
-    return run_match(deck_a, deck_b, seed, match_id=match_id, php_script=php_script)
+def _run_match_job(job: tuple[int, str, str, int, str | None, str, int | None, int | None]) -> MatchResult:
+    match_id, deck_a, deck_b, seed, php_script, policy, mcts_iterations, mcts_max_depth = job
+    return run_match(
+        deck_a,
+        deck_b,
+        seed,
+        match_id=match_id,
+        php_script=php_script,
+        policy=policy,
+        mcts_iterations=mcts_iterations,
+        mcts_max_depth=mcts_max_depth,
+    )
 
 
 def run_benchmark(
@@ -203,12 +221,24 @@ def run_benchmark(
 ) -> list[MatchResult]:
     global_seed = int(seed_policy.get("global_seed", 0))
     php_script = seed_policy.get("php_script")
+    policy = str(seed_policy.get("policy", "random_legal") or "random_legal")
+    mcts_iterations = seed_policy.get("mcts_iterations")
+    mcts_max_depth = seed_policy.get("mcts_max_depth")
 
-    jobs: list[tuple[int, str, str, int, str | None]] = []
+    jobs: list[tuple[int, str, str, int, str | None, str, int | None, int | None]] = []
     match_id = 0
     for deck_a, deck_b in deck_pairs:
         for _ in range(n_games):
-            jobs.append((match_id, deck_a, deck_b, _derive_seed(global_seed, match_id), php_script))
+            jobs.append((
+                match_id,
+                deck_a,
+                deck_b,
+                _derive_seed(global_seed, match_id),
+                php_script,
+                policy,
+                int(mcts_iterations) if mcts_iterations is not None else None,
+                int(mcts_max_depth) if mcts_max_depth is not None else None,
+            ))
             match_id += 1
 
     with ProcessPoolExecutor(max_workers=workers) as pool:

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import backup as data_backup
 from .runner import MatchResult, run_benchmark
 
 DATA_DIR = Path("sim_harness") / "data"
@@ -16,6 +17,7 @@ DECKS_FILE = DATA_DIR / "decks.json"
 SIMS_FILE = DATA_DIR / "simulations.json"
 SUPPORTED_MIN_DECK_SIZES = {30, 50}
 DEFAULT_MIN_DECK_SIZE = 50
+SUPPORTED_POLICIES = ("random_legal", "random_non_pass", "first_non_pass", "heuristic", "mcts")
 
 
 @dataclass
@@ -39,6 +41,17 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _safe_daily_backup(*, refresh_today: bool = False) -> None:
+    try:
+        data_backup.ensure_daily_data_backup(
+            data_dir=DATA_DIR,
+            retention_days=30,
+            refresh_today=refresh_today,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"warning: daily backup skipped: {exc}")
+
+
 
 def _ensure_data_files() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -59,6 +72,7 @@ def _read_json_list(path: Path) -> list[dict[str, Any]]:
 
 
 def _write_json_list(path: Path, payload: list[dict[str, Any]]) -> None:
+    _safe_daily_backup(refresh_today=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
@@ -159,6 +173,14 @@ def _find_deck(decks: list[DeckRecord], deck_id: str) -> DeckRecord:
     raise ValueError(f"Deck not found: {deck_id}")
 
 
+def _delete_deck(deck_id: str) -> DeckRecord:
+    decks = _load_decks()
+    target = _find_deck(decks, deck_id)
+    remaining = [d for d in decks if d.deck_id != deck_id]
+    _save_decks(remaining)
+    return target
+
+
 
 def cmd_deck_upload(args: argparse.Namespace) -> int:
     decks = _load_decks()
@@ -209,6 +231,12 @@ def cmd_deck_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_deck_delete(args: argparse.Namespace) -> int:
+    removed = _delete_deck(args.deck_id)
+    print(f"Deleted deck {removed.deck_id} :: {removed.name}")
+    return 0
+
+
 
 def _load_sims() -> list[dict[str, Any]]:
     return _read_json_list(SIMS_FILE)
@@ -217,6 +245,121 @@ def _load_sims() -> list[dict[str, Any]]:
 
 def _save_sims(sims: list[dict[str, Any]]) -> None:
     _write_json_list(SIMS_FILE, sims)
+
+
+def _extract_illegal_event_rows(
+    results: list[MatchResult],
+    opponents: list[DeckRecord],
+    games_per_opponent: int,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    by_action: dict[str, int] = {}
+    by_phase: dict[str, int] = {}
+    by_player: dict[str, int] = {}
+    by_opponent: dict[str, dict[str, Any]] = {}
+    match_illegal_seen: set[int] = set()
+
+    for opp in opponents:
+        by_opponent[opp.deck_id] = {
+            "deck_id": opp.deck_id,
+            "deck_name": opp.name,
+            "pool": opp.pool,
+            "games": 0,
+            "illegal_actions": 0,
+            "matches_with_illegal": 0,
+        }
+
+    for result in results:
+        opponent_idx = result.match_id // games_per_opponent if games_per_opponent > 0 else 0
+        if opponent_idx < 0 or opponent_idx >= len(opponents):
+            continue
+        opp = opponents[opponent_idx]
+        by_opponent[opp.deck_id]["games"] += 1
+        had_illegal = False
+
+        outcome = result.outcome if isinstance(result.outcome, dict) else {}
+        events = outcome.get("events", [])
+        if not isinstance(events, list):
+            events = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            if bool(event.get("apply_ok", True)):
+                continue
+
+            had_illegal = True
+            match_illegal_seen.add(int(result.match_id))
+
+            action = event.get("action", {}) if isinstance(event.get("action"), dict) else {}
+            phase_begin = event.get("phase_state_begin", {}) if isinstance(event.get("phase_state_begin"), dict) else {}
+            p1 = phase_begin.get("player_1", {}) if isinstance(phase_begin.get("player_1"), dict) else {}
+            p2 = phase_begin.get("player_2", {}) if isinstance(phase_begin.get("player_2"), dict) else {}
+            p1_res = p1.get("resources", {}) if isinstance(p1.get("resources"), dict) else {}
+            p2_res = p2.get("resources", {}) if isinstance(p2.get("resources"), dict) else {}
+            meta = phase_begin.get("meta", {}) if isinstance(phase_begin.get("meta"), dict) else {}
+            card = event.get("card", {}) if isinstance(event.get("card"), dict) else {}
+            action_type = str(action.get("type", "unknown"))
+            phase = str(event.get("phase", ""))
+            player = int(event.get("player", 0))
+            choice = action.get("buttonInput", "")
+            if choice in ("", None):
+                choice = action.get("cardID", "")
+            mode_raw = str(action.get("mode", "")).strip()
+            action_mode = int(mode_raw) if mode_raw not in ("", "None") else 0
+
+            row = {
+                "match_id": int(result.match_id),
+                "seed": int(result.seed),
+                "opponent_index": int(opponent_idx),
+                "opponent_deck_id": opp.deck_id,
+                "opponent_name": opp.name,
+                "opponent_pool": opp.pool,
+                "step": int(event.get("step", 0)),
+                "round": int(event.get("round", 0)),
+                "phase": phase,
+                "player": player,
+                "action_type": action_type,
+                "action_mode": action_mode,
+                "action_choice": str(choice),
+                "card_id": str(card.get("id", "")),
+                "card_raw_id": str(card.get("raw_id", "")),
+                "message": str(event.get("message", "")),
+                "legal_action_count": int(event.get("legal_action_count", 0)),
+                "legal_actions_by_type": event.get("legal_actions_by_type", {}) if isinstance(event.get("legal_actions_by_type"), dict) else {},
+                "turn_player": int(meta.get("turn_player", 0)),
+                "turn_phase": str(meta.get("turn_phase", "")),
+                "next_player": int(event.get("next_player", 0)),
+                "next_phase": str(event.get("next_phase", "")),
+                "p1_hp": int((p1.get("base", {}) or {}).get("health", 0)) if isinstance(p1.get("base", {}), dict) else 0,
+                "p2_hp": int((p2.get("base", {}) or {}).get("health", 0)) if isinstance(p2.get("base", {}), dict) else 0,
+                "p1_ready_resources": int(p1_res.get("ready_cards", 0)),
+                "p2_ready_resources": int(p2_res.get("ready_cards", 0)),
+            }
+            rows.append(row)
+
+            by_action[action_type] = by_action.get(action_type, 0) + 1
+            by_phase[phase] = by_phase.get(phase, 0) + 1
+            by_player[str(player)] = by_player.get(str(player), 0) + 1
+            by_opponent[opp.deck_id]["illegal_actions"] += 1
+
+        if had_illegal:
+            by_opponent[opp.deck_id]["matches_with_illegal"] += 1
+
+    rows.sort(key=lambda r: (int(r.get("match_id", 0)), int(r.get("step", 0))))
+    by_action_sorted = dict(sorted(by_action.items(), key=lambda kv: (-kv[1], kv[0])))
+    by_phase_sorted = dict(sorted(by_phase.items(), key=lambda kv: (-kv[1], kv[0])))
+    by_player_sorted = dict(sorted(by_player.items(), key=lambda kv: (-kv[1], kv[0])))
+    by_opponent_rows = sorted(by_opponent.values(), key=lambda r: (-int(r.get("illegal_actions", 0)), str(r.get("deck_id", ""))))
+
+    return {
+        "total_illegal_actions": len(rows),
+        "matches_with_illegal": len(match_illegal_seen),
+        "by_action_type": by_action_sorted,
+        "by_phase": by_phase_sorted,
+        "by_player": by_player_sorted,
+        "by_opponent": by_opponent_rows,
+        "rows": rows,
+    }
 
 
 
@@ -246,7 +389,13 @@ def cmd_sim_create(args: argparse.Namespace) -> int:
     results = run_benchmark(
         deck_pairs=deck_pairs,
         n_games=args.games,
-        seed_policy={"global_seed": args.seed, "php_script": args.php_script},
+        seed_policy={
+            "global_seed": args.seed,
+            "php_script": args.php_script,
+            "policy": args.policy,
+            "mcts_iterations": args.mcts_iterations,
+            "mcts_max_depth": args.mcts_max_depth,
+        },
         workers=args.workers,
     )
 
@@ -262,6 +411,15 @@ def cmd_sim_create(args: argparse.Namespace) -> int:
         games = len(rows)
         win_rate = (wins / games) if games else 0.0
         turns = [r.turns for r in rows]
+        illegal_actions = 0
+        matches_with_illegal = 0
+        for r in rows:
+            outcome = r.outcome if isinstance(r.outcome, dict) else {}
+            stats = outcome.get("stats", {}) if isinstance(outcome.get("stats"), dict) else {}
+            illegal_count = int(stats.get("illegal_actions", 0))
+            illegal_actions += illegal_count
+            if illegal_count > 0:
+                matches_with_illegal += 1
         opponent_results.append(
             {
                 "deck_id": opp.deck_id,
@@ -271,11 +429,14 @@ def cmd_sim_create(args: argparse.Namespace) -> int:
                 "wins": wins,
                 "win_rate": round(win_rate, 4),
                 "avg_turns": round(statistics.fmean(turns), 2) if turns else 0.0,
+                "illegal_actions": illegal_actions,
+                "matches_with_illegal": matches_with_illegal,
             }
         )
 
     all_games = sum(r["games"] for r in opponent_results)
     all_wins = sum(r["wins"] for r in opponent_results)
+    illegal_audit = _extract_illegal_event_rows(results, opponents, args.games)
 
     sim_id = args.sim_id or datetime.now(timezone.utc).strftime("sim-%Y%m%d-%H%M%S")
     sim_payload = {
@@ -287,14 +448,20 @@ def cmd_sim_create(args: argparse.Namespace) -> int:
         "games_per_opponent": args.games,
         "seed": args.seed,
         "workers": args.workers,
+        "policy": args.policy,
+        "mcts_iterations": int(args.mcts_iterations or 0),
+        "mcts_max_depth": int(args.mcts_max_depth or 0),
         "min_cards": min_cards,
         "overall": {
             "games": all_games,
             "wins": all_wins,
             "losses": all_games - all_wins,
             "win_rate": round((all_wins / all_games), 4) if all_games else 0.0,
+            "illegal_actions": int(illegal_audit.get("total_illegal_actions", 0)),
+            "matches_with_illegal": int(illegal_audit.get("matches_with_illegal", 0)),
         },
         "opponents": opponent_results,
+        "illegal_move_audit": illegal_audit,
     }
 
     sims = _load_sims()
@@ -340,7 +507,11 @@ def cmd_sim_analysis(args: argparse.Namespace) -> int:
 
     print(f"Simulation: {sim['sim_id']}")
     print(f"Candidate: {sim['candidate_deck_id']} :: {sim['candidate_name']}")
+    print(f"Policy: {sim.get('policy', 'random_legal')}")
     print(f"Overall win rate: {sim['overall']['win_rate']:.2%} ({sim['overall']['wins']}/{sim['overall']['games']})")
+    illegal_actions = int(sim.get("overall", {}).get("illegal_actions", 0))
+    matches_with_illegal = int(sim.get("overall", {}).get("matches_with_illegal", 0))
+    print(f"Illegal actions: {illegal_actions} across {matches_with_illegal} matches")
 
     tier_summary: dict[str, dict[str, float]] = {}
     for r in rows:
@@ -369,6 +540,271 @@ def cmd_sim_analysis(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_policy_list(raw: str) -> list[str]:
+    parts = [p.strip() for p in str(raw).split(",")]
+    policies: list[str] = []
+    seen: set[str] = set()
+    for p in parts:
+        if p == "":
+            continue
+        if p not in SUPPORTED_POLICIES:
+            allowed = ", ".join(SUPPORTED_POLICIES)
+            raise ValueError(f"Unsupported policy '{p}'. Allowed: {allowed}")
+        if p in seen:
+            continue
+        seen.add(p)
+        policies.append(p)
+    if not policies:
+        raise ValueError("No valid policies selected for shootout.")
+    return policies
+
+
+def _resolve_candidate_and_opponents(
+    candidate_id: str,
+    opponent_set: str,
+    min_cards: int,
+) -> tuple[DeckRecord, list[DeckRecord]]:
+    decks = _load_decks()
+    candidate = _find_deck(decks, candidate_id)
+    _assert_min_deck_size(candidate.swudb, min_cards, f"Candidate deck '{candidate.deck_id}'")
+
+    if opponent_set == "all":
+        opponents = [d for d in decks if d.deck_id != candidate.deck_id and d.pool in {"meta", "starter"}]
+    else:
+        opponents = [d for d in decks if d.deck_id != candidate.deck_id and d.pool == opponent_set]
+
+    if not opponents:
+        raise ValueError("No opponent decks found for selected set. Upload decks to meta/starter pools first.")
+    invalid_opponents = [d for d in opponents if _deck_main_count(d.swudb) < min_cards]
+    if invalid_opponents:
+        sample = ", ".join(f"{d.deck_id}({_deck_main_count(d.swudb)})" for d in invalid_opponents[:8])
+        more = f" (+{len(invalid_opponents)-8} more)" if len(invalid_opponents) > 8 else ""
+        raise ValueError(
+            f"Opponent decks below minimum {min_cards} cards: {sample}{more}. "
+            "Use a lower minimum or upload larger decks."
+        )
+
+    return candidate, opponents
+
+
+def cmd_sim_shootout(args: argparse.Namespace) -> int:
+    min_cards = _coerce_min_cards(getattr(args, "min_cards", DEFAULT_MIN_DECK_SIZE))
+    candidate, opponents = _resolve_candidate_and_opponents(args.candidate, args.opponents, min_cards)
+    policies = _parse_policy_list(args.policies)
+
+    deck_pairs = [(_deck_to_runner_string(candidate.swudb), _deck_to_runner_string(o.swudb)) for o in opponents]
+    per_policy: list[dict[str, Any]] = []
+
+    for policy in policies:
+        results = run_benchmark(
+            deck_pairs=deck_pairs,
+            n_games=args.games,
+            seed_policy={
+                "global_seed": args.seed,
+                "php_script": args.php_script,
+                "policy": policy,
+                "mcts_iterations": args.mcts_iterations if policy == "mcts" else 0,
+                "mcts_max_depth": args.mcts_max_depth if policy == "mcts" else 0,
+            },
+            workers=args.workers,
+        )
+        illegal_audit = _extract_illegal_event_rows(results, opponents, args.games)
+        turns = [r.turns for r in results]
+        total_games = len(results)
+        total_wins = sum(1 for r in results if int(r.winner) == 1)
+        avg_turns = round(statistics.fmean(turns), 2) if turns else 0.0
+
+        grouped: dict[int, list[MatchResult]] = {}
+        for result in results:
+            bucket = result.match_id // args.games if args.games > 0 else 0
+            grouped.setdefault(bucket, []).append(result)
+        by_opponent: list[dict[str, Any]] = []
+        for idx, opp in enumerate(opponents):
+            rows = grouped.get(idx, [])
+            wins = sum(1 for r in rows if int(r.winner) == 1)
+            games = len(rows)
+            win_rate = (wins / games) if games else 0.0
+            by_opponent.append({
+                "deck_id": opp.deck_id,
+                "deck_name": opp.name,
+                "pool": opp.pool,
+                "games": games,
+                "wins": wins,
+                "win_rate": round(win_rate, 4),
+            })
+
+        per_policy.append({
+            "policy": policy,
+            "games": total_games,
+            "wins": total_wins,
+            "losses": total_games - total_wins,
+            "win_rate": round((total_wins / total_games), 4) if total_games else 0.0,
+            "avg_turns": avg_turns,
+            "illegal_actions": int(illegal_audit.get("total_illegal_actions", 0)),
+            "matches_with_illegal": int(illegal_audit.get("matches_with_illegal", 0)),
+            "mcts_iterations": int(args.mcts_iterations if policy == "mcts" else 0),
+            "mcts_max_depth": int(args.mcts_max_depth if policy == "mcts" else 0),
+            "by_opponent": by_opponent,
+            "illegal_move_audit": illegal_audit,
+        })
+
+    ranked = sorted(
+        per_policy,
+        key=lambda row: (-float(row["win_rate"]), int(row["illegal_actions"]), float(row["avg_turns"]), str(row["policy"])),
+    )
+
+    print("Policy shootout")
+    print(f"Candidate: {candidate.deck_id} :: {candidate.name}")
+    print(f"Opponents: {args.opponents} ({len(opponents)} decks)")
+    print(f"Games/opponent: {args.games} | Seed: {args.seed} | Workers: {args.workers}")
+    print("")
+    print("Rank  Policy            Win Rate   W-L        Games  Illegal  Avg Turns  MCTS(i/d)")
+    for i, row in enumerate(ranked, start=1):
+        policy = str(row["policy"])
+        wr = f"{float(row['win_rate']) * 100:6.2f}%"
+        wl = f"{int(row['wins'])}-{int(row['losses'])}"
+        games = int(row["games"])
+        illegal = int(row["illegal_actions"])
+        avg_turns = f"{float(row['avg_turns']):.2f}"
+        mcts_id = "-"
+        if policy == "mcts":
+            mcts_id = f"{int(row['mcts_iterations'])}/{int(row['mcts_max_depth'])}"
+        print(f"{i:>4}  {policy:<16}  {wr:<8}  {wl:<9}  {games:>5}  {illegal:>7}  {avg_turns:>9}  {mcts_id:>9}")
+
+    payload = {
+        "created_at": _now_iso(),
+        "candidate_deck_id": candidate.deck_id,
+        "candidate_name": candidate.name,
+        "opponent_set": args.opponents,
+        "opponent_count": len(opponents),
+        "games_per_opponent": int(args.games),
+        "seed": int(args.seed),
+        "workers": int(args.workers),
+        "min_cards": int(min_cards),
+        "requested_policies": policies,
+        "ranked": ranked,
+    }
+
+    out_json = str(args.out_json or "").strip()
+    if out_json != "":
+        out_path = Path(out_json)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        print("")
+        print(f"Wrote shootout report: {out_path}")
+    return 0
+
+
+def cmd_rl_collect(args: argparse.Namespace) -> int:
+    from .rl.action_space import ActionVocab
+    from .rl.dataset import attach_action_indices, build_training_rows_from_results, write_jsonl_rows
+
+    min_cards = _coerce_min_cards(getattr(args, "min_cards", DEFAULT_MIN_DECK_SIZE))
+    candidate, opponents = _resolve_candidate_and_opponents(args.candidate, args.opponents, min_cards)
+    policies = _parse_policy_list(args.policies)
+
+    deck_pairs = [(_deck_to_runner_string(candidate.swudb), _deck_to_runner_string(o.swudb)) for o in opponents]
+    all_rows: list[dict[str, Any]] = []
+    collected_by_policy: dict[str, int] = {}
+
+    for policy in policies:
+        results = run_benchmark(
+            deck_pairs=deck_pairs,
+            n_games=args.games,
+            seed_policy={
+                "global_seed": args.seed,
+                "php_script": args.php_script,
+                "policy": policy,
+                "mcts_iterations": args.mcts_iterations if policy == "mcts" else 0,
+                "mcts_max_depth": args.mcts_max_depth if policy == "mcts" else 0,
+            },
+            workers=args.workers,
+            output_jsonl=None,
+            output_parquet=None,
+        )
+        rows = build_training_rows_from_results(results, source_policy=policy, hash_dim=args.hash_dim)
+        all_rows.extend(rows)
+        collected_by_policy[policy] = len(rows)
+        print(f"Collected {len(rows)} rows from policy={policy}")
+
+    if len(all_rows) == 0:
+        raise ValueError("No training rows collected. Verify PHP runner output and selected decks.")
+
+    vocab = ActionVocab()
+    for row in all_rows:
+        vocab.add(str(row.get("action_key", "")))
+    attach_action_indices(all_rows, vocab)
+
+    if args.output_prefix:
+        prefix = Path(args.output_prefix)
+    else:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        prefix = Path("sim_harness/data/rl") / f"{candidate.deck_id}-{ts}"
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+
+    dataset_path = prefix.with_suffix(".jsonl")
+    vocab_path = prefix.with_suffix(".vocab.json")
+    meta_path = prefix.with_suffix(".meta.json")
+
+    write_jsonl_rows(dataset_path, all_rows)
+    vocab.save_json(vocab_path)
+
+    meta = {
+        "created_at": _now_iso(),
+        "candidate_deck_id": candidate.deck_id,
+        "candidate_name": candidate.name,
+        "opponent_set": args.opponents,
+        "opponent_count": len(opponents),
+        "games_per_opponent": int(args.games),
+        "seed": int(args.seed),
+        "workers": int(args.workers),
+        "min_cards": int(min_cards),
+        "policies": policies,
+        "hash_dim": int(args.hash_dim),
+        "mcts_iterations": int(args.mcts_iterations),
+        "mcts_max_depth": int(args.mcts_max_depth),
+        "total_rows": len(all_rows),
+        "action_vocab_size": len(vocab),
+        "rows_by_policy": collected_by_policy,
+        "dataset_path": str(dataset_path),
+        "vocab_path": str(vocab_path),
+    }
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    _safe_daily_backup(refresh_today=True)
+
+    print("")
+    print(f"Dataset rows: {len(all_rows)}")
+    print(f"Action vocab size: {len(vocab)}")
+    print(f"Dataset: {dataset_path}")
+    print(f"Vocab:   {vocab_path}")
+    print(f"Meta:    {meta_path}")
+    return 0
+
+
+def cmd_rl_train(args: argparse.Namespace) -> int:
+    from .rl.train import train_policy_value_model
+
+    summary = train_policy_value_model(
+        dataset_path=args.dataset,
+        vocab_path=args.vocab,
+        model_out=args.model_out,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        val_split=args.val_split,
+        hidden_dim=args.hidden_dim,
+        hidden_layers=args.hidden_layers,
+        dropout=args.dropout,
+        value_loss_weight=args.value_loss_weight,
+        seed=args.seed,
+        device=args.device,
+    )
+    _safe_daily_backup(refresh_today=True)
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Deckxpert simulation manager CLI")
@@ -392,6 +828,10 @@ def build_parser() -> argparse.ArgumentParser:
     deck_show.add_argument("--format", choices=["summary", "swudb"], default="summary")
     deck_show.set_defaults(func=cmd_deck_show)
 
+    deck_delete = deck_sub.add_parser("delete", help="Delete one deck")
+    deck_delete.add_argument("deck_id")
+    deck_delete.set_defaults(func=cmd_deck_delete)
+
     sim = sub.add_parser("sim", help="Manage simulations")
     sim_sub = sim.add_subparsers(dest="action", required=True)
 
@@ -404,6 +844,13 @@ def build_parser() -> argparse.ArgumentParser:
     sim_create.add_argument("--php-script", default=None)
     sim_create.add_argument("--sim-id", default=None)
     sim_create.add_argument("--min-cards", type=int, choices=sorted(SUPPORTED_MIN_DECK_SIZES), default=DEFAULT_MIN_DECK_SIZE)
+    sim_create.add_argument(
+        "--policy",
+        choices=list(SUPPORTED_POLICIES),
+        default="random_legal",
+    )
+    sim_create.add_argument("--mcts-iterations", type=int, default=16)
+    sim_create.add_argument("--mcts-max-depth", type=int, default=14)
     sim_create.set_defaults(func=cmd_sim_create)
 
     sim_results = sim_sub.add_parser("results", help="Show top-level sim results")
@@ -418,6 +865,63 @@ def build_parser() -> argparse.ArgumentParser:
     sim_analysis.add_argument("sim_id")
     sim_analysis.set_defaults(func=cmd_sim_analysis)
 
+    sim_shootout = sim_sub.add_parser("shootout", help="Compare multiple policies on the same matchup/seed set")
+    sim_shootout.add_argument("--candidate", required=True, help="Candidate deck id")
+    sim_shootout.add_argument("--opponents", choices=["meta", "starter", "all"], default="all")
+    sim_shootout.add_argument("--games", type=int, default=20, help="Games per opponent")
+    sim_shootout.add_argument("--seed", type=int, default=42)
+    sim_shootout.add_argument("--workers", type=int, default=4)
+    sim_shootout.add_argument("--php-script", default=None)
+    sim_shootout.add_argument("--min-cards", type=int, choices=sorted(SUPPORTED_MIN_DECK_SIZES), default=DEFAULT_MIN_DECK_SIZE)
+    sim_shootout.add_argument(
+        "--policies",
+        default="random_legal,heuristic,mcts",
+        help="Comma-separated list. Example: random_legal,heuristic,mcts",
+    )
+    sim_shootout.add_argument("--mcts-iterations", type=int, default=16)
+    sim_shootout.add_argument("--mcts-max-depth", type=int, default=14)
+    sim_shootout.add_argument("--out-json", default=None, help="Optional report output path")
+    sim_shootout.set_defaults(func=cmd_sim_shootout)
+
+    rl = sub.add_parser("rl", help="RL dataset/model tooling")
+    rl_sub = rl.add_subparsers(dest="action", required=True)
+
+    rl_collect = rl_sub.add_parser("collect", help="Collect supervised policy/value dataset from simulated games")
+    rl_collect.add_argument("--candidate", required=True, help="Candidate deck id")
+    rl_collect.add_argument("--opponents", choices=["meta", "starter", "all"], default="all")
+    rl_collect.add_argument("--games", type=int, default=20, help="Games per opponent")
+    rl_collect.add_argument("--seed", type=int, default=42)
+    rl_collect.add_argument("--workers", type=int, default=4)
+    rl_collect.add_argument("--php-script", default=None)
+    rl_collect.add_argument("--min-cards", type=int, choices=sorted(SUPPORTED_MIN_DECK_SIZES), default=DEFAULT_MIN_DECK_SIZE)
+    rl_collect.add_argument(
+        "--policies",
+        default="heuristic,mcts",
+        help="Comma-separated policy list. Example: heuristic,mcts",
+    )
+    rl_collect.add_argument("--mcts-iterations", type=int, default=16)
+    rl_collect.add_argument("--mcts-max-depth", type=int, default=14)
+    rl_collect.add_argument("--hash-dim", type=int, default=256, help="Hashed card-feature dimensions")
+    rl_collect.add_argument("--output-prefix", default=None, help="Output prefix (without extension)")
+    rl_collect.set_defaults(func=cmd_rl_collect)
+
+    rl_train = rl_sub.add_parser("train", help="Train policy/value model from exported dataset")
+    rl_train.add_argument("--dataset", required=True, help="Dataset jsonl path from rl collect")
+    rl_train.add_argument("--vocab", required=True, help="Action vocab json path from rl collect")
+    rl_train.add_argument("--model-out", required=True, help="Output model checkpoint path (.pt)")
+    rl_train.add_argument("--epochs", type=int, default=10)
+    rl_train.add_argument("--batch-size", type=int, default=256)
+    rl_train.add_argument("--lr", type=float, default=1e-3)
+    rl_train.add_argument("--weight-decay", type=float, default=1e-5)
+    rl_train.add_argument("--val-split", type=float, default=0.1)
+    rl_train.add_argument("--hidden-dim", type=int, default=256)
+    rl_train.add_argument("--hidden-layers", type=int, default=2)
+    rl_train.add_argument("--dropout", type=float, default=0.1)
+    rl_train.add_argument("--value-loss-weight", type=float, default=1.0)
+    rl_train.add_argument("--seed", type=int, default=42)
+    rl_train.add_argument("--device", default="auto", help="auto/cpu/cuda")
+    rl_train.set_defaults(func=cmd_rl_train)
+
     return parser
 
 
@@ -426,6 +930,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        _safe_daily_backup(refresh_today=False)
         return int(args.func(args))
     except Exception as exc:  # noqa: BLE001
         print(f"error: {exc}")

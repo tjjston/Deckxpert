@@ -55,6 +55,30 @@ The simulation UI (`sim_harness.web`) currently supports:
 bash petranaki.sh start
 ```
 
+GPU-enabled sim harness (for RL training in dashboard ML Lab):
+```bash
+SIM_HARNESS_GPU_DEVICES=0,1 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build sim-harness-web
+```
+
+### Docker Setup Tips
+
+- Install NVIDIA Container Toolkit on the host before using GPU containers.
+- Verify Docker can see GPUs:
+```bash
+docker run --rm --gpus all nvidia/cuda:12.3.2-runtime-ubuntu22.04 nvidia-smi
+```
+- Verify the Deckxpert sim container sees GPUs:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml exec sim-harness-web nvidia-smi
+```
+- Pin specific GPUs:
+  - both GPUs: `SIM_HARNESS_GPU_DEVICES=0,1`
+  - single GPU: `SIM_HARNESS_GPU_DEVICES=0`
+- Rebuild if dependencies/image layers get stale:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml build --no-cache sim-harness-web
+```
+
 ### 2. Open UIs
 - Arena app: `http://localhost:8080/Arena/MainMenu.php`
 - Sim dashboard: `http://localhost:8765`
@@ -87,6 +111,26 @@ python -m sim_harness.web --host 127.0.0.1 --port 8765
 - validation matrix trigger instances.
 4. Run **Simulation** (N games/opponent set) for aggregate performance.
 5. Inspect simulation analysis and matchup breakdown.
+
+## ML Changes (New)
+
+- Added ML job execution inside `sim_harness` dashboard:
+  - `sim create`
+  - `sim shootout`
+  - `rl collect`
+  - `rl train`
+- Added async ML job queue with:
+  - live logs,
+  - status (`queued/running/succeeded/failed/stopped`),
+  - stop controls.
+- Added GPU-aware runtime controls via `CUDA_VISIBLE_DEVICES` per ML job.
+- Added GPU-enabled Docker assets:
+  - `docker-compose.gpu.yml`
+  - `docker/sim-harness-gpu.Dockerfile`
+- Added automatic daily backup snapshots (30-day retention) for:
+  - deck list data,
+  - simulation history,
+  - RL/training artifacts (compressed + deduplicated blobs).
 
 ## Important Notes
 
