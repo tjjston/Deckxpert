@@ -1,4 +1,3 @@
-version: "3.7"
 services:
   web-server:
     build:
@@ -25,19 +24,21 @@ services:
       MYSQL_SERVER_NAME: "mysql-server"
       MYSQL_SERVER_USER_NAME: "root"
       REDIS_HOST: "app_redis"
-      REDIS_ENABLED: true
+      REDIS_ENABLED: "true"
       DOMAIN: "${DOMAIN:-localhost}"
       STAGE: "${STAGE:-prod}"
-    user: "${DOCKER_USER}"
+    user: "${DOCKER_USER:-0:0}"
 
   sim-harness-web:
-    image: python:3.11-slim
+    build:
+      context: ./docker
+      dockerfile: sim-harness.Dockerfile
+    image: deckxpert-sim-harness:local
     restart: always
     working_dir: /workspace
     volumes:
       - "./:/workspace:Z"
-    command: >
-      bash -lc "apt-get update && apt-get install -y --no-install-recommends php-cli && rm -rf /var/lib/apt/lists/* && python -m sim_harness.web --host 0.0.0.0 --port 8765"
+    command: python -m sim_harness.web --host 0.0.0.0 --port 8765
     ports:
       - "8765:8765"
     depends_on:
