@@ -67,7 +67,10 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 <label>Deck ID (optional)</label><input id=\"deckId\" placeholder=\"my-candidate-v1\"/>
 <label>Pool</label><select id=\"pool\"><option>candidate</option><option>meta</option><option>starter</option></select>
 <label>SWUDB JSON</label><textarea id=\"deckJson\" placeholder='{"metadata":{"name":"..."},...}'></textarea>
-<button onclick=\"uploadDeck()\">Upload Deck</button><div id=\"uploadMsg\" class=\"muted\"></div></div>
+<button id=\"uploadDeckBtn\" onclick=\"uploadDeck()\">Upload Deck</button>
+<button id=\"saveDeckEditBtn\" style=\"display:none;background:#0f766e;border-color:#0f766e\" onclick=\"saveDeckEdit()\">Save Deck Edit</button>
+<button id=\"cancelDeckEditBtn\" style=\"display:none;background:#475569;border-color:#475569\" onclick=\"cancelDeckEdit()\">Cancel Edit</button>
+<div id=\"uploadMsg\" class=\"muted\"></div></div>
 
 <div class=\"card\"><h3>Follow One Match (Turn-by-turn legality)</h3>
 <label>Player A deck</label><select id=\"deckA\"></select>
@@ -194,6 +197,7 @@ const cardArtCache = new Map();
 let hoverSession = 0;
 let currentMlJobId = '';
 let mlRefreshTimer = null;
+let editingDeckId = '';
 
 function loadMatchPrefs(){
   try{
@@ -322,9 +326,24 @@ function renderMatchDecks(decks){
   const seedInput=document.getElementById('matchSeed');
   if(seedInput && String(prefs.seed||'').trim()!=='') seedInput.value=String(prefs.seed);
 }
-function renderDecks(decks){const tb=document.getElementById('decksTbody');tb.innerHTML='';decks.forEach(d=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${d.deck_id}</td><td>${d.pool}</td><td>${d.name}</td><td>${d.deck_size}</td><td><button onclick=\"showDeck('${d.deck_id}')\">View</button> <button onclick=\"deleteDeck('${d.deck_id}')\" style=\"background:#b91c1c;border-color:#b91c1c\">Remove</button></td>`;tb.appendChild(tr);});}
+function setDeckEditMode(deckId=''){
+  editingDeckId=String(deckId||'').trim();
+  const uploadBtn=document.getElementById('uploadDeckBtn');
+  const saveBtn=document.getElementById('saveDeckEditBtn');
+  const cancelBtn=document.getElementById('cancelDeckEditBtn');
+  const deckIdInput=document.getElementById('deckId');
+  if(uploadBtn) uploadBtn.style.display=editingDeckId===''?'':'none';
+  if(saveBtn) saveBtn.style.display=editingDeckId===''?'none':'';
+  if(cancelBtn) cancelBtn.style.display=editingDeckId===''?'none':'';
+  if(deckIdInput) deckIdInput.disabled=editingDeckId!=='';
+}
+function renderDecks(decks){const tb=document.getElementById('decksTbody');tb.innerHTML='';decks.forEach(d=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${d.deck_id}</td><td>${d.pool}</td><td>${d.name}</td><td>${d.deck_size}</td><td><button onclick=\"showDeck('${d.deck_id}')\">View</button> <button onclick=\"editDeck('${d.deck_id}')\" style=\"background:#0f766e;border-color:#0f766e\">Edit</button> <button onclick=\"renameDeck('${d.deck_id}')\" style=\"background:#7c3aed;border-color:#7c3aed\">Rename</button> <button onclick=\"deleteDeck('${d.deck_id}')\" style=\"background:#b91c1c;border-color:#b91c1c\">Remove</button></td>`;tb.appendChild(tr);});}
 function renderSims(sims){const tb=document.getElementById('simsTbody');tb.innerHTML='';sims.forEach(s=>{const tr=document.createElement('tr');const wr=((s.overall?.win_rate||0)*100).toFixed(2)+'%';const illegal=Number(s.overall?.illegal_actions||0);tr.innerHTML=`<td>${s.sim_id}</td><td>${s.candidate_deck_id}</td><td>${wr}</td><td>${s.overall?.games||0}</td><td>${illegal}</td><td><button onclick=\"showSim('${s.sim_id}')\">Analyze</button></td>`;tb.appendChild(tr);});}
 async function uploadDeck(){
+  if(editingDeckId!==''){
+    await saveDeckEdit();
+    return;
+  }
   const msg=document.getElementById('uploadMsg');
   msg.textContent='Uploading...';
   try{
@@ -344,6 +363,77 @@ async function uploadDeck(){
     msg.textContent='Error: '+e.message;
   }
 }
+async function saveDeckEdit(){
+  const msg=document.getElementById('uploadMsg');
+  if(editingDeckId===''){
+    msg.textContent='Error: No deck is selected for editing.';
+    return;
+  }
+  msg.textContent='Saving deck edit...';
+  try{
+    const raw=document.getElementById('deckJson').value;
+    let swudb={};
+    try{
+      swudb=JSON.parse(raw);
+    }catch(parseErr){
+      msg.textContent='Error: Invalid JSON. '+parseErr.message;
+      return;
+    }
+    const out=await api('/api/decks/'+encodeURIComponent(editingDeckId),{method:'PUT',body:JSON.stringify({pool:document.getElementById('pool').value,swudb})});
+    const warnings=Array.isArray(out?.warnings)?out.warnings:[];
+    msg.textContent=warnings.length?('Saved with warning: '+warnings.join(' ')):'Saved changes for '+editingDeckId;
+    const editedDeckId=editingDeckId;
+    setDeckEditMode('');
+    await refreshAll();
+    await showDeck(editedDeckId);
+  }catch(e){
+    msg.textContent='Error: '+e.message;
+  }
+}
+function cancelDeckEdit(){
+  setDeckEditMode('');
+  const msg=document.getElementById('uploadMsg');
+  if(msg) msg.textContent='Edit cancelled.';
+}
+async function editDeck(id){
+  if(!id) return;
+  const msg=document.getElementById('uploadMsg');
+  msg.textContent='Loading deck...';
+  try{
+    const d=await api('/api/decks/'+encodeURIComponent(id));
+    document.getElementById('deckId').value=String(d.deck_id||id);
+    setSelectValueIfPresent(document.getElementById('pool'),d.pool||'candidate');
+    document.getElementById('deckJson').value=JSON.stringify(d.swudb||{},null,2);
+    setDeckEditMode(id);
+    msg.textContent='Editing '+id+'. Update JSON then click \"Save Deck Edit\".';
+  }catch(e){
+    msg.textContent='Error: '+e.message;
+  }
+}
+async function renameDeck(id){
+  if(!id) return;
+  const msg=document.getElementById('uploadMsg');
+  msg.textContent='Loading deck...';
+  try{
+    const d=await api('/api/decks/'+encodeURIComponent(id));
+    const currentName=String(d?.swudb?.metadata?.name||id);
+    const nextName=window.prompt('Rename deck',currentName);
+    if(nextName===null){
+      msg.textContent='Rename cancelled.';
+      return;
+    }
+    const cleaned=String(nextName).trim();
+    if(cleaned===''){
+      msg.textContent='Error: Name cannot be blank.';
+      return;
+    }
+    const out=await api('/api/decks/'+encodeURIComponent(id)+'/rename',{method:'POST',body:JSON.stringify({name:cleaned})});
+    msg.textContent='Renamed '+id+' to '+String(out?.name||cleaned);
+    await refreshAll();
+  }catch(e){
+    msg.textContent='Error: '+e.message;
+  }
+}
 async function deleteDeck(id){
   if(!id) return;
   const ok=window.confirm(`Delete deck '${id}' from local list?`);
@@ -352,6 +442,7 @@ async function deleteDeck(id){
   msg.textContent='Deleting...';
   try{
     await api('/api/decks/'+encodeURIComponent(id),{method:'DELETE'});
+    if(editingDeckId===id) setDeckEditMode('');
     msg.textContent='Deleted '+id;
     const deckView=document.getElementById('deckView');
     if(deckView) deckView.textContent='Select a deck to view SWUDB JSON.';
@@ -2610,6 +2701,19 @@ class SimWebHandler(BaseHTTPRequestHandler):
                     raise ValueError(f"Unknown job id: {job_id}") from exc
                 self._send_json({"ok": True, "job": job})
                 return
+            if path.startswith("/api/decks/") and path.endswith("/rename"):
+                deck_id = path[len("/api/decks/") : -len("/rename")].strip("/")
+                if not deck_id:
+                    raise ValueError("deck id is required")
+                payload = self._read_json()
+                name = str(payload.get("name", "")).strip()
+                if not name:
+                    raise ValueError("name is required")
+                author_raw = payload.get("author")
+                author = None if author_raw is None else str(author_raw)
+                updated = cli._rename_deck(deck_id, name=name, author=author)
+                self._send_json({"ok": True, "deck_id": updated.deck_id, "name": updated.name, "author": updated.author})
+                return
             if path == "/api/decks":
                 payload = self._read_json()
                 swudb = payload.get("swudb")
@@ -2714,6 +2818,32 @@ class SimWebHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+        except Exception as exc:  # noqa: BLE001
+            self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def do_PUT(self) -> None:  # noqa: N802
+        try:
+            path = urlparse(self.path).path
+            if path.startswith("/api/decks/"):
+                deck_id = path.rsplit("/", 1)[-1]
+                if not deck_id:
+                    raise ValueError("deck id is required")
+                payload = self._read_json()
+                swudb = payload.get("swudb")
+                if not isinstance(swudb, dict):
+                    raise ValueError("swudb must be a JSON object")
+                swudb, warnings = cli._normalize_swudb_deck(swudb)
+                cli._validate_swudb_deck(swudb)
+                pool_raw = payload.get("pool", None)
+                pool = None
+                if pool_raw is not None:
+                    pool = str(pool_raw).strip()
+                    if pool not in {"candidate", "meta", "starter"}:
+                        raise ValueError("pool must be candidate/meta/starter")
+                updated = cli._update_deck(deck_id, swudb=swudb, pool=pool)
+                self._send_json({"ok": True, "deck_id": updated.deck_id, "name": updated.name, "pool": updated.pool, "warnings": warnings})
+                return
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:  # noqa: BLE001
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)

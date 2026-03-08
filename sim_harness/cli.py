@@ -314,6 +314,48 @@ def _delete_deck(deck_id: str) -> DeckRecord:
     return target
 
 
+def _update_deck(deck_id: str, *, swudb: dict[str, Any] | None = None, pool: str | None = None) -> DeckRecord:
+    decks = _load_decks()
+    updated: DeckRecord | None = None
+    for deck in decks:
+        if deck.deck_id != deck_id:
+            continue
+        if swudb is not None:
+            deck.swudb = swudb
+        if pool is not None:
+            deck.pool = pool
+        updated = deck
+        break
+    if updated is None:
+        raise ValueError(f"Deck not found: {deck_id}")
+    _save_decks(decks)
+    return updated
+
+
+def _rename_deck(deck_id: str, *, name: str, author: str | None = None) -> DeckRecord:
+    cleaned_name = str(name).strip()
+    if not cleaned_name:
+        raise ValueError("name is required")
+    decks = _load_decks()
+    updated: DeckRecord | None = None
+    for deck in decks:
+        if deck.deck_id != deck_id:
+            continue
+        metadata = deck.swudb.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            deck.swudb["metadata"] = metadata
+        metadata["name"] = cleaned_name
+        if author is not None:
+            metadata["author"] = str(author).strip() or "unknown"
+        updated = deck
+        break
+    if updated is None:
+        raise ValueError(f"Deck not found: {deck_id}")
+    _save_decks(decks)
+    return updated
+
+
 
 def cmd_deck_upload(args: argparse.Namespace) -> int:
     decks = _load_decks()
