@@ -33,8 +33,16 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 .topTiles{display:grid;grid-template-columns:repeat(4,minmax(260px,1fr));gap:12px;align-items:start;margin-bottom:12px}
 .mlGrid{display:grid;grid-template-columns:repeat(3,minmax(260px,1fr));gap:12px}
 .singleMatchGrid{display:grid;grid-template-columns:minmax(0,2fr) minmax(360px,1fr);gap:12px;align-items:start}
+.tabBar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.tabBtn{width:auto;padding:8px 12px;background:#0b1220;border:1px solid #334155;color:#cbd5e1}
+.tabBtn.active{background:#1d4ed8;border-color:#1d4ed8;color:#fff}
+.replayGrid{display:grid;grid-template-columns:repeat(2,minmax(260px,1fr));gap:12px}
+.replayPanel{background:#020617;border:1px solid #334155;border-radius:8px;padding:10px}
+.replayControls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.replayControls button{width:auto}
+.replayControls input[type=range]{flex:1;min-width:200px}
 @media (max-width:1400px){.topTiles{grid-template-columns:repeat(2,minmax(260px,1fr))}}
-@media (max-width:1200px){.singleMatchGrid{grid-template-columns:1fr}.topTiles{grid-template-columns:1fr}.mlGrid{grid-template-columns:1fr}}
+@media (max-width:1200px){.singleMatchGrid{grid-template-columns:1fr}.topTiles{grid-template-columns:1fr}.mlGrid{grid-template-columns:1fr}.replayGrid{grid-template-columns:1fr}}
 .muted{color:#94a3b8;font-size:12px}pre{white-space:pre;overflow:auto;background:#020617;border:1px solid #334155;border-radius:8px;padding:10px}
 .ok{color:#22c55e}.bad{color:#ef4444}
 .cardRef{cursor:pointer;color:#93c5fd;text-decoration:underline}
@@ -62,17 +70,28 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 </style></head><body>
 <header><h1>Deckxpert Simulation Dashboard</h1></header>
 <div class=\"page\">
+<div class=\"tabBar\">
+<button class=\"tabBtn\" data-tab-btn=\"deck\" onclick=\"setActiveTab('deck')\">Deck Studio</button>
+<button class=\"tabBtn\" data-tab-btn=\"ml\" onclick=\"setActiveTab('ml')\">ML Training</button>
+<button class=\"tabBtn\" data-tab-btn=\"sim\" onclick=\"setActiveTab('sim')\">Sim Output</button>
+<button class=\"tabBtn\" data-tab-btn=\"replay\" onclick=\"setActiveTab('replay')\">SWU Replay</button>
+</div>
 <div class=\"topTiles\">
-<div class=\"card\"><h3>Add Deck</h3>
+<div class=\"card\" data-tab=\"deck\"><h3>Add Deck</h3>
 <label>Deck ID (optional)</label><input id=\"deckId\" placeholder=\"my-candidate-v1\"/>
 <label>Pool</label><select id=\"pool\"><option>candidate</option><option>meta</option><option>starter</option></select>
 <label>SWUDB JSON</label><textarea id=\"deckJson\" placeholder='{"metadata":{"name":"..."},...}'></textarea>
 <button id=\"uploadDeckBtn\" onclick=\"uploadDeck()\">Upload Deck</button>
 <button id=\"saveDeckEditBtn\" style=\"display:none;background:#0f766e;border-color:#0f766e\" onclick=\"saveDeckEdit()\">Save Deck Edit</button>
 <button id=\"cancelDeckEditBtn\" style=\"display:none;background:#475569;border-color:#475569\" onclick=\"cancelDeckEdit()\">Cancel Edit</button>
+<label>Random Deck Count</label><input id=\"randomDeckCount\" type=\"number\" min=\"1\" value=\"1\"/>
+<label>Random Main Deck Size</label><select id=\"randomDeckMainSize\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
+<label>Random Seed (optional)</label><input id=\"randomDeckSeed\" type=\"number\" placeholder=\"auto\"/>
+<label>Random Deck ID Prefix</label><input id=\"randomDeckPrefix\" value=\"random\"/>
+<button style=\"background:#0369a1;border-color:#0369a1\" onclick=\"generateRandomDecks()\">Generate Random Deck(s)</button>
 <div id=\"uploadMsg\" class=\"muted\"></div></div>
 
-<div class=\"card\"><h3>Follow One Match (Turn-by-turn legality)</h3>
+<div class=\"card\" data-tab=\"sim\"><h3>Follow One Match (Turn-by-turn legality)</h3>
 <label>Player A deck</label><select id=\"deckA\"></select>
 <label>Player B deck</label><select id=\"deckB\"></select>
 <label>Deck Minimum</label><select id=\"matchMinCards\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
@@ -82,7 +101,7 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 <label>Seed</label><input id=\"matchSeed\" type=\"number\" value=\"123\"/>
 <button onclick=\"runSingleMatch()\">Run Match</button><div id=\"matchMsg\" class=\"muted\">Runs until game over (or safety cap).</div></div>
 
-<div class=\"card\"><h3>Create Simulation</h3>
+<div class=\"card\" data-tab=\"sim\"><h3>Create Simulation</h3>
 <label>Candidate Deck</label><select id=\"candidate\"></select>
 <label>Opponent Set</label><select id=\"opponents\"><option>all</option><option>meta</option><option>starter</option></select>
 <label>Deck Minimum</label><select id=\"simMinCards\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
@@ -96,20 +115,19 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 <label>Simulation ID (optional)</label><input id=\"simId\" placeholder=\"sim-my-run\"/>
 <button onclick=\"createSimulation()\">Run Simulation</button><div id=\"simMsg\" class=\"muted\"></div></div>
 
-<div class=\"card\"><h3>How To Use (Best Results)</h3>
+<div class=\"card\" data-tab=\"ml\"><h3>How To Use (ML Phases)</h3>
 <div class=\"muted\">
-1) Upload decks into pools: your test deck in <code>candidate</code>, benchmarks in <code>meta</code>/<code>starter</code>.<br/>
-2) Run <strong>Follow One Match</strong> with <code>heuristic</code> or <code>mcts</code> to confirm engine behavior and legality.<br/>
-3) Run <strong>Create Simulation</strong> (or ML Lab <code>sim_shootout</code>) to benchmark random vs heuristic vs mcts on the same seed set.<br/>
-4) In <strong>ML Lab</strong>, run <code>rl_collect</code> with policies like <code>heuristic,mcts</code> to build training data.<br/>
-5) Run <code>rl_train</code> with <code>device=cuda</code> and GPUs <code>0,1</code> (or a single GPU) to train policy/value checkpoints.<br/>
-6) Re-run shootouts and sims to validate win-rate lift and illegal-move stability before using models in deck scoring.<br/>
-Backup tip: copy <code>sim_harness/data/decks.json</code> before major runs.
+1) Deck phase: use <strong>Deck Studio</strong> to import/edit/delete decks and generate random candidates.<br/>
+2) Sim phase: use <strong>Sim Output</strong> to run single matches and create benchmark simulations.<br/>
+3) Collect phase: in <strong>ML Training</strong>, run <code>RL Collect</code> with policies like <code>heuristic,mcts</code>.<br/>
+4) Train phase: run <code>RL Train</code> on the collected dataset (GPU optional via <code>CUDA_VISIBLE_DEVICES</code>).<br/>
+5) Evaluate phase: run <code>sim create</code> or <code>sim shootout</code> again to compare policy quality.<br/>
+6) Replay phase: open <strong>SWU Replay</strong> to inspect step-by-step board state and both players' hands from the latest single match.
 </div>
 <pre id=\"howToRuntime\" class=\"muted\">Runtime info loading...</pre>
 </div>
 </div>
-<div class=\"card\"><h3>ML Lab (Async Sims + Training)</h3>
+<div class=\"card\" data-tab=\"ml\"><h3>ML Lab (Async Sims + Training)</h3>
 <div id=\"mlInfo\" class=\"muted\">Loading runtime info...</div>
 <div class=\"mlGrid\">
 <div class=\"card\"><h3>Simulation Job</h3>
@@ -169,19 +187,32 @@ Backup tip: copy <code>sim_harness/data/decks.json</code> before major runs.
 <div class=\"muted\" id=\"mlJobMeta\">Select a job to view full logs.</div>
 <pre id=\"mlJobLogs\" class=\"logBox\">No job selected.</pre>
 </div>
-<div class=\"grid\">
-<div class=\"card\"><h3>Decks</h3><table><thead><tr><th>ID</th><th>Pool</th><th>Name</th><th>Cards</th><th></th></tr></thead><tbody id=\"decksTbody\"></tbody></table></div>
-<div class=\"card\"><h3>Simulations</h3><table><thead><tr><th>ID</th><th>Candidate</th><th>Winrate</th><th>Games</th><th>Illegal</th><th></th></tr></thead><tbody id=\"simsTbody\"></tbody></table></div>
+<div class=\"grid\" data-tab-container=\"grid\">
+<div class=\"card\" data-tab=\"deck\"><h3>Decks</h3><table><thead><tr><th>ID</th><th>Pool</th><th>Name</th><th>Cards</th><th></th></tr></thead><tbody id=\"decksTbody\"></tbody></table></div>
+<div class=\"card\" data-tab=\"sim\"><h3>Simulations</h3><table><thead><tr><th>ID</th><th>Candidate</th><th>Winrate</th><th>Games</th><th>Illegal</th><th></th></tr></thead><tbody id=\"simsTbody\"></tbody></table></div>
 </div>
-<div class=\"card\"><h3>Simulation Analysis</h3><pre id=\"analysis\">Select a simulation to inspect analysis.</pre></div>
-<div class=\"card\"><h3>Simulation Illegal Move Audit</h3><div id=\"simIllegalSummary\" class=\"muted\">Select a simulation to inspect illegal move details.</div><table><thead><tr><th>Match</th><th>Opponent</th><th>Step</th><th>Round</th><th>Phase</th><th>Player</th><th>Action</th><th>Card</th><th>Message</th><th>Legal Options</th></tr></thead><tbody id=\"simIllegalTbody\"></tbody></table></div>
-<div class=\"card\"><h3>Deck JSON Viewer (SWUDB)</h3><pre id=\"deckView\">Select a deck to view SWUDB JSON.</pre></div>
-<div class=\"singleMatchGrid\">
+<div class=\"card\" data-tab=\"sim\"><h3>Simulation Analysis</h3><pre id=\"analysis\">Select a simulation to inspect analysis.</pre></div>
+<div class=\"card\" data-tab=\"sim\"><h3>Simulation Illegal Move Audit</h3><div id=\"simIllegalSummary\" class=\"muted\">Select a simulation to inspect illegal move details.</div><table><thead><tr><th>Match</th><th>Opponent</th><th>Step</th><th>Round</th><th>Phase</th><th>Player</th><th>Action</th><th>Card</th><th>Message</th><th>Legal Options</th></tr></thead><tbody id=\"simIllegalTbody\"></tbody></table></div>
+<div class=\"card\" data-tab=\"deck\"><h3>Deck JSON Viewer (SWUDB)</h3><pre id=\"deckView\">Select a deck to view SWUDB JSON.</pre></div>
+<div class=\"singleMatchGrid\" data-tab=\"sim\">
 <div class=\"card\"><h3>Single Match Timeline</h3><div style=\"display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;\"><span class=\"muted\">Match JSON</span><button id=\"toggleMatchSummaryBtn\" style=\"width:auto;margin:0;padding:4px 10px;\" onclick=\"toggleMatchSummary()\">Expand JSON</button></div><pre id=\"matchSummary\" style=\"display:none;\">Run a single match to see turn-by-turn legality.</pre><div id=\"openingState\" class=\"muted\"></div><div class=\"muted\">Round page: <button onclick=\"prevRoundPage()\">Prev</button> <button onclick=\"nextRoundPage()\">Next</button> <span id=\"roundPageInfo\">-</span> <label style=\"display:inline;margin-left:8px;\"><input style=\"width:auto;\" id=\"showDecisionSteps\" type=\"checkbox\" onchange=\"renderRoundPage()\"/> Show decision prompts</label></div><table><thead><tr><th>Step</th><th>Round</th><th>Phase</th><th>Player</th><th>Kind</th><th>Action</th><th>Card</th><th>Legal?</th><th>Initiative</th><th>P1 Resources</th><th>P2 Resources</th><th>Board State</th></tr></thead><tbody id=\"matchTbody\"></tbody></table></div>
 <div class=\"card\"><h3>Keyword Trigger Audit</h3><table><thead><tr><th>Step</th><th>Round</th><th>Player</th><th>Card</th><th>Keyword</th><th>Triggered</th><th>Correct?</th><th>Turn Action</th><th>Evidence</th></tr></thead><tbody id=\"keywordAuditTbody\"></tbody></table><div class=\"muted\">Tracks keyword cards used in gameplay actions and whether keyword effects were observed in the match log.</div></div>
 </div>
-<div class=\"card\"><h3>Validation Matrix (Mechanics Seen In Log)</h3><table><thead><tr><th>Mechanic</th><th>Triggered</th><th>Count</th><th>First Step</th><th>Evidence</th></tr></thead><tbody id=\"validationMatrixTbody\"></tbody></table><div class=\"muted\">Flags are inferred from the current match timeline and prompt/effect logs.</div></div>
-<div class=\"card\"><h3>Timeline By Round/Phase</h3><table><thead><tr><th>Round</th><th>Phase</th><th>Steps</th><th>Illegal</th><th>P1 Base HP</th><th>P2 Base HP</th><th>Actions</th></tr></thead><tbody id=\"timelineByPhaseTbody\"></tbody></table></div>
+<div class=\"card\" data-tab=\"sim\"><h3>Validation Matrix (Mechanics Seen In Log)</h3><table><thead><tr><th>Mechanic</th><th>Triggered</th><th>Count</th><th>First Step</th><th>Evidence</th></tr></thead><tbody id=\"validationMatrixTbody\"></tbody></table><div class=\"muted\">Flags are inferred from the current match timeline and prompt/effect logs.</div></div>
+<div class=\"card\" data-tab=\"sim\"><h3>Timeline By Round/Phase</h3><table><thead><tr><th>Round</th><th>Phase</th><th>Steps</th><th>Illegal</th><th>P1 Base HP</th><th>P2 Base HP</th><th>Actions</th></tr></thead><tbody id=\"timelineByPhaseTbody\"></tbody></table></div>
+<div class=\"card\" data-tab=\"replay\"><h3>SWU Bot Replay (Latest Single Match)</h3>
+<div class=\"muted\">Run a single match in <strong>Sim Output</strong>, then inspect each step here with forward/backward controls.</div>
+<div class=\"replayControls\">
+<button onclick=\"replayPrev()\">Prev Step</button>
+<button onclick=\"replayNext()\">Next Step</button>
+<input id=\"replayStepRange\" type=\"range\" min=\"0\" max=\"0\" value=\"0\" oninput=\"setReplayIndex(parseInt(this.value||'0',10))\"/>
+<span id=\"replayStepLabel\" class=\"muted\">No replay loaded.</span>
+</div>
+<div class=\"replayGrid\">
+<div class=\"replayPanel\"><h4>Move</h4><pre id=\"replayEvent\">Run a single match to populate replay.</pre></div>
+<div class=\"replayPanel\"><h4>Board + Hands</h4><pre id=\"replayBoard\">Run a single match to populate replay.</pre></div>
+</div>
+</div>
 </div>
 <div id=\"cardHover\"><img id=\"cardHoverImg\" alt=\"Card art\"/><div id=\"cardHoverMeta\" class=\"meta\"></div></div>
 <div id=\"cardModal\" onclick=\"closeCardModal()\"><button id=\"cardModalClose\" onclick=\"closeCardModal();event.stopPropagation();\">Close</button><img id=\"cardModalImg\" alt=\"Card art\"/></div>
@@ -189,6 +220,7 @@ Backup tip: copy <code>sim_harness/data/decks.json</code> before major runs.
 const DECISION_TYPES = new Set(['yesno','decision','choose_zone','choose_deck','opt_top','opt_bottom','multi_choose','dynamic_input','hand_top','hand_bottom']);
 const SUMMARY_COLLAPSE_KEY = 'deckxpert_match_summary_collapsed';
 const MATCH_PREFS_KEY = 'deckxpert_single_match_prefs';
+const DASHBOARD_TAB_KEY = 'deckxpert_dashboard_active_tab';
 let currentMatchEvents = [];
 let roundNumbers = [];
 let currentRoundPage = 0;
@@ -198,6 +230,8 @@ let hoverSession = 0;
 let currentMlJobId = '';
 let mlRefreshTimer = null;
 let editingDeckId = '';
+let activeTab = 'deck';
+let replayIndex = 0;
 
 function loadMatchPrefs(){
   try{
@@ -240,6 +274,40 @@ function initMatchPrefBindings(){
     el.addEventListener('change',persistMatchPrefs);
   });
 }
+function _tabMatches(el,tab){
+  const raw=String(el?.dataset?.tab||'').trim();
+  if(raw==='') return false;
+  return raw.split(',').map(s=>s.trim()).filter(Boolean).includes(String(tab||'').trim());
+}
+function updateTabContainers(){
+  document.querySelectorAll('[data-tab-container]').forEach(container=>{
+    const kids=Array.from(container.children||[]).filter(el=>el && el.dataset && typeof el.dataset.tab==='string');
+    if(kids.length===0) return;
+    const hasVisible=kids.some(el=>el.style.display!=='none');
+    container.style.display=hasVisible?'':'none';
+  });
+}
+function setActiveTab(tab){
+  const selected=String(tab||'').trim()||'deck';
+  activeTab=selected;
+  document.querySelectorAll('[data-tab]').forEach(el=>{
+    el.style.display=_tabMatches(el,selected)?'':'none';
+  });
+  document.querySelectorAll('[data-tab-btn]').forEach(btn=>{
+    const on=String(btn?.dataset?.tabBtn||'')===selected;
+    btn.classList.toggle('active',on);
+  });
+  updateTabContainers();
+  try{localStorage.setItem(DASHBOARD_TAB_KEY,selected);}catch(_e){}
+}
+function initTabs(){
+  let stored='deck';
+  try{
+    stored=String(localStorage.getItem(DASHBOARD_TAB_KEY)||'deck').trim()||'deck';
+  }catch(_e){}
+  if(!['deck','ml','sim','replay'].includes(stored)) stored='deck';
+  setActiveTab(stored);
+}
 
 async function api(path, opts={}){
   const r=await fetch(path,{headers:{'Content-Type':'application/json'},...opts});
@@ -267,6 +335,12 @@ async function refreshAll(){
       `sims_file: ${set.sims_file||'-'}`,
     ];
     rt.textContent=lines.join('\\n');
+  }
+  if(!Boolean((s.settings||{}).php_available)){
+    const phpScriptInput=document.getElementById('phpScript');
+    if(phpScriptInput && String(phpScriptInput.value||'').trim()==='sim_harness/php_match_runner.php'){
+      phpScriptInput.value='';
+    }
   }
   await refreshMlInfo();
   await refreshMlJobs();
@@ -363,6 +437,39 @@ async function uploadDeck(){
     msg.textContent='Error: '+e.message;
   }
 }
+async function generateRandomDecks(){
+  if(editingDeckId!==''){
+    const msg=document.getElementById('uploadMsg');
+    if(msg) msg.textContent='Finish or cancel deck edit before generating random decks.';
+    return;
+  }
+  const msg=document.getElementById('uploadMsg');
+  msg.textContent='Generating random deck(s)...';
+  try{
+    const count=Math.max(1,parseInt(document.getElementById('randomDeckCount')?.value||'1',10)||1);
+    const mainSize=parseInt(document.getElementById('randomDeckMainSize')?.value||'50',10)||50;
+    const seedRaw=String(document.getElementById('randomDeckSeed')?.value||'').trim();
+    const seed=(seedRaw==='')?null:parseInt(seedRaw,10);
+    const out=await api('/api/decks/random',{method:'POST',body:JSON.stringify({
+      count:count,
+      pool:document.getElementById('pool')?.value||'candidate',
+      main_size:mainSize,
+      seed:Number.isFinite(seed)?seed:null,
+      deck_id_prefix:document.getElementById('randomDeckPrefix')?.value||'random',
+    })});
+    const created=Array.isArray(out?.created)?out.created:[];
+    const ids=created.map(d=>String(d.deck_id||'')).filter(v=>v!=='');
+    const shown=ids.slice(0,4).join(', ');
+    const suffix=ids.length>4?` (+${ids.length-4} more)`:'';
+    msg.textContent=ids.length>0?`Created ${ids.length} random deck(s): ${shown}${suffix}`:'Random deck generation completed.';
+    await refreshAll();
+    if(ids.length>0){
+      await showDeck(ids[0]);
+    }
+  }catch(e){
+    msg.textContent='Error: '+e.message;
+  }
+}
 async function saveDeckEdit(){
   const msg=document.getElementById('uploadMsg');
   if(editingDeckId===''){
@@ -451,7 +558,56 @@ async function deleteDeck(id){
     msg.textContent='Error: '+e.message;
   }
 }
-async function createSimulation(){const msg=document.getElementById('simMsg');msg.textContent='Running...';try{const out=await api('/api/simulations',{method:'POST',body:JSON.stringify({candidate:document.getElementById('candidate').value,opponents:document.getElementById('opponents').value,min_cards:parseInt(document.getElementById('simMinCards').value||'50',10),policy:document.getElementById('simPolicy').value||'random_legal',mcts_iterations:parseInt(document.getElementById('simMctsIterations').value||'16',10),mcts_max_depth:parseInt(document.getElementById('simMctsDepth').value||'14',10),games:parseInt(document.getElementById('games').value||'20',10),seed:parseInt(document.getElementById('seed').value||'42',10),workers:parseInt(document.getElementById('workers').value||'4',10),php_script:document.getElementById('phpScript').value||null,sim_id:document.getElementById('simId').value||null})});msg.textContent='Created '+out.sim_id;await refreshAll();await showSim(out.sim_id);}catch(e){msg.textContent='Error: '+e.message;}}
+function buildCreateSimPayload(){
+  return {
+    candidate:document.getElementById('candidate')?.value||'',
+    opponents:document.getElementById('opponents')?.value||'all',
+    min_cards:parseInt(document.getElementById('simMinCards')?.value||'50',10),
+    policy:document.getElementById('simPolicy')?.value||'random_legal',
+    mcts_iterations:parseInt(document.getElementById('simMctsIterations')?.value||'16',10),
+    mcts_max_depth:parseInt(document.getElementById('simMctsDepth')?.value||'14',10),
+    games:parseInt(document.getElementById('games')?.value||'20',10),
+    seed:parseInt(document.getElementById('seed')?.value||'42',10),
+    workers:parseInt(document.getElementById('workers')?.value||'4',10),
+    php_script:document.getElementById('phpScript')?.value||null,
+    sim_id:document.getElementById('simId')?.value||null,
+  };
+}
+async function createSimulation(){
+  const msg=document.getElementById('simMsg');
+  if(msg) msg.textContent='Running...';
+  const payload=buildCreateSimPayload();
+  try{
+    const out=await api('/api/simulations',{method:'POST',body:JSON.stringify(payload)});
+    if(msg) msg.textContent='Created '+out.sim_id;
+    await refreshAll();
+    await showSim(out.sim_id);
+  }catch(e){
+    const text=String(e?.message||e||'');
+    const isNetworkIssue=text.includes('NetworkError') || text.includes('Failed to fetch');
+    if(isNetworkIssue){
+      if(msg){
+        msg.textContent='Direct request dropped; submitting async simulation job instead...';
+      }
+      await launchMlJob({
+        job_type:'sim_create',
+        candidate:payload.candidate,
+        opponents:payload.opponents,
+        min_cards:payload.min_cards,
+        policy:payload.policy,
+        mcts_iterations:payload.mcts_iterations,
+        mcts_max_depth:payload.mcts_max_depth,
+        games:payload.games,
+        seed:payload.seed,
+        workers:payload.workers,
+        php_script:payload.php_script,
+        sim_id:payload.sim_id,
+      },'simMsg');
+      return;
+    }
+    if(msg) msg.textContent='Error: '+text;
+  }
+}
 async function showDeck(id){const d=await api('/api/decks/'+encodeURIComponent(id));document.getElementById('deckView').textContent=JSON.stringify(d.swudb,null,2);}
 function renderSimulationIllegalAudit(sim){
   const summary=document.getElementById('simIllegalSummary');
@@ -1823,6 +1979,122 @@ function renderRoundPage(){
 function prevRoundPage(){if(roundNumbers.length===0)return;currentRoundPage=Math.max(0,currentRoundPage-1);renderRoundPage();}
 function nextRoundPage(){if(roundNumbers.length===0)return;currentRoundPage=Math.min(roundNumbers.length-1,currentRoundPage+1);renderRoundPage();}
 
+function _replayFmtCards(cards,limit=30){
+  const arr=Array.isArray(cards)?cards:[];
+  if(arr.length===0) return '-';
+  const shown=arr.slice(0,limit).map(x=>String(x||'')).join(', ');
+  if(arr.length<=limit) return shown;
+  return `${shown} ... (+${arr.length-limit} more)`;
+}
+function _replayFmtUnits(details,limit=8){
+  const arr=Array.isArray(details)?details:[];
+  if(arr.length===0) return '-';
+  const mapped=arr.slice(0,limit).map(u=>{
+    const id=String(u?.id||u?.raw_id||'unit');
+    const nowP=Number(u?.current_power??0);
+    const nowHp=Number(u?.current_hp??0);
+    const maxHp=Number(u?.max_hp??0);
+    const stance=Boolean(u?.ready)?'ready':(Boolean(u?.exhausted)?'exhausted':'-');
+    const dmg=Number(u?.damage_taken??0);
+    const upg=Array.isArray(u?.upgrades)?u.upgrades:[];
+    return `${id} [${stance}] pwr:${nowP} hp:${nowHp}/${maxHp}${dmg>0?` dmg:${dmg}`:''}${upg.length?` upg:${_replayFmtCards(upg,4)}`:''}`;
+  });
+  if(arr.length>limit) mapped.push(`+${arr.length-limit} more units`);
+  return mapped.join('\\n');
+}
+function _replayPlayerBlock(stepState,boardState,pid){
+  const phaseP=(stepState&&typeof stepState==='object')?stepState[`player_${pid}`]||{}:{};
+  const boardP=(boardState&&typeof boardState==='object')?boardState[`player_${pid}`]||{}:{};
+  const counts=phaseP?.counts||{};
+  const zones=phaseP?.zones||{};
+  const resources=phaseP?.resources||{};
+  const units=boardP?.units?.details||[];
+  const handCards=Array.isArray(boardP?.hand_cards)?boardP.hand_cards:(Array.isArray(zones?.hand)?zones.hand:[]);
+  const force=boardP?.force||phaseP?.force||{};
+  const hp=boardP?.base_hp ?? phaseP?.base?.health ?? '?';
+  const deckCount=boardP?.deck_count ?? counts?.deck ?? '?';
+  const discardCount=boardP?.discard_count ?? counts?.discard ?? '?';
+  const readyRes=resources?.ready_cards ?? resources?.available ?? '?';
+  const exhRes=resources?.exhausted_cards ?? resources?.spent ?? '?';
+  const totalRes=resources?.total_cards ?? '?';
+  const forceStatus=String(force?.status||'unavailable');
+  const forceUsed=Number(force?.times_used_this_phase ?? 0);
+  return [
+    `P${pid} base HP: ${hp}`,
+    `Resources: ready=${readyRes}, exhausted=${exhRes}, total=${totalRes}`,
+    `Zones: hand=${Array.isArray(handCards)?handCards.length:0}, deck=${deckCount}, discard=${discardCount}`,
+    `Force: ${forceStatus} (used this phase: ${forceUsed})`,
+    `Hand: ${_replayFmtCards(handCards,40)}`,
+    `Units:\\n${_replayFmtUnits(units,10)}`,
+  ].join('\\n');
+}
+function renderReplayStep(){
+  const label=document.getElementById('replayStepLabel');
+  const range=document.getElementById('replayStepRange');
+  const eventBox=document.getElementById('replayEvent');
+  const boardBox=document.getElementById('replayBoard');
+  const total=currentMatchEvents.length;
+  if(total===0){
+    if(label) label.textContent='No replay loaded.';
+    if(range){range.min='0';range.max='0';range.value='0';}
+    if(eventBox) eventBox.textContent='Run a single match to populate replay.';
+    if(boardBox) boardBox.textContent='Run a single match to populate replay.';
+    return;
+  }
+  replayIndex=Math.max(0,Math.min(total-1,Number.isFinite(replayIndex)?replayIndex:0));
+  if(range){
+    range.min='0';
+    range.max=String(Math.max(0,total-1));
+    range.value=String(replayIndex);
+  }
+  const e=currentMatchEvents[replayIndex]||{};
+  const actionType=String(e?.action?.type||'');
+  const actionChoice=String(e?.action?.buttonInput||e?.action?.cardID||'').trim();
+  const applyOk=Boolean(e?.apply_ok);
+  const legalCount=Number(e?.legal_action_count||0);
+  const stepState=(e?.phase_state_end && typeof e.phase_state_end==='object')?e.phase_state_end:(e?.phase_state_begin||{});
+  const boardState=(e?.board_state_end && typeof e.board_state_end==='object')?e.board_state_end:{};
+  if(label) label.textContent=`Step ${e?.step ?? '?'} (${replayIndex+1}/${total}) | Round ${e?.round ?? '?'} ${e?.phase ?? '-'} | Player ${e?.player ?? '?'}`;
+  if(eventBox){
+    eventBox.textContent=[
+      `Apply: ${applyOk?'ok':'illegal'}`,
+      `Action: ${actionType}${actionChoice!==''?` (${actionChoice})`:''}`,
+      `Card: ${e?.card?.id||e?.card?.raw_id||'-'}`,
+      `Legal options at step: ${legalCount}`,
+      `Initiative: player ${e?.initiative_player ?? '-'} (${Number(e?.initiative_taken)===1?'taken':'open'})`,
+      `Message: ${String(e?.message||'').trim()||'-'}`,
+    ].join('\\n');
+  }
+  if(boardBox){
+    boardBox.textContent=[
+      _replayPlayerBlock(stepState,boardState,1),
+      '',
+      _replayPlayerBlock(stepState,boardState,2),
+    ].join('\\n');
+  }
+}
+function refreshReplayFromMatch(){
+  const total=currentMatchEvents.length;
+  if(total===0){
+    replayIndex=0;
+  }else if(replayIndex>=total){
+    replayIndex=total-1;
+  }
+  renderReplayStep();
+}
+function setReplayIndex(idx){
+  replayIndex=Number.isFinite(idx)?idx:0;
+  renderReplayStep();
+}
+function replayPrev(){
+  replayIndex=Math.max(0,replayIndex-1);
+  renderReplayStep();
+}
+function replayNext(){
+  replayIndex=Math.min(Math.max(0,currentMatchEvents.length-1),replayIndex+1);
+  renderReplayStep();
+}
+
 async function runSingleMatch(){
   const msg=document.getElementById('matchMsg');
   const opening=document.getElementById('openingState');
@@ -1847,16 +2119,21 @@ async function runSingleMatch(){
     renderKeywordAudit(currentMatchEvents);
     renderValidationMatrix(currentMatchEvents);
     renderTimelineByPhase(currentMatchEvents);
+    refreshReplayFromMatch();
   }catch(e){
     msg.textContent='Error: '+e.message;
     document.getElementById('analysis').textContent='Single Match Analysis unavailable due to match run error.';
     renderKeywordAudit([]);
     renderValidationMatrix([]);
+    currentMatchEvents=[];
+    refreshReplayFromMatch();
   }
 }
 
+initTabs();
 initUiState();
 initMatchPrefBindings();
+refreshReplayFromMatch();
 window.addEventListener('blur', hideCardHover);
 window.addEventListener('scroll', hideCardHover, {passive:true});
 window.addEventListener('resize', hideCardHover);
@@ -2713,6 +2990,50 @@ class SimWebHandler(BaseHTTPRequestHandler):
                 author = None if author_raw is None else str(author_raw)
                 updated = cli._rename_deck(deck_id, name=name, author=author)
                 self._send_json({"ok": True, "deck_id": updated.deck_id, "name": updated.name, "author": updated.author})
+                return
+            if path == "/api/decks/random":
+                payload = self._read_json()
+                count = _parse_int_field(payload, "count", 1, minimum=1)
+                pool = str(payload.get("pool", "candidate")).strip() or "candidate"
+                if pool not in {"candidate", "meta", "starter"}:
+                    raise ValueError("pool must be candidate/meta/starter")
+                main_size = cli._coerce_min_cards(payload.get("main_size", cli.DEFAULT_MIN_DECK_SIZE))
+                seed_raw = payload.get("seed", None)
+                seed = None if seed_raw in (None, "") else int(seed_raw)
+                deck_id = _optional_text(payload, "deck_id")
+                deck_id_prefix = str(payload.get("deck_id_prefix", "random")).strip() or "random"
+                name_prefix = str(payload.get("name_prefix", "Random Deck")).strip() or "Random Deck"
+                author = str(payload.get("author", "sim_harness_random")).strip() or "sim_harness_random"
+                max_copies = _parse_int_field(payload, "max_copies", 3, minimum=1)
+
+                created = cli._create_random_decks(
+                    count=count,
+                    pool=pool,
+                    main_size=main_size,
+                    seed=seed,
+                    deck_id=deck_id,
+                    deck_id_prefix=deck_id_prefix,
+                    name_prefix=name_prefix,
+                    author=author,
+                    max_copies=max_copies,
+                )
+                self._send_json(
+                    {
+                        "ok": True,
+                        "count": len(created),
+                        "created": [
+                            {
+                                "deck_id": d.deck_id,
+                                "pool": d.pool,
+                                "name": d.name,
+                                "deck_size": cli._deck_main_count(d.swudb),
+                                "leader_id": str((d.swudb.get("leader", {}) or {}).get("id", "")),
+                                "base_id": str((d.swudb.get("base", {}) or {}).get("id", "")),
+                            }
+                            for d in created
+                        ],
+                    }
+                )
                 return
             if path == "/api/decks":
                 payload = self._read_json()

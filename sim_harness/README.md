@@ -189,6 +189,7 @@ Examples:
 python -m sim_harness.cli deck upload --file path/to/deck.json --pool candidate --deck-id my-candidate
 python -m sim_harness.cli deck upload --file path/to/meta.json --pool meta
 python -m sim_harness.cli deck upload --file path/to/starter.json --pool starter
+python -m sim_harness.cli deck random --count 20 --pool candidate --main-size 50 --seed 123 --deck-id-prefix random
 
 python -m sim_harness.cli deck list --pool all
 python -m sim_harness.cli deck show my-candidate --format swudb
@@ -221,6 +222,52 @@ Outputs from `rl collect`:
 Requirements for `rl train`:
 - `numpy`
 - `torch` (PyTorch)
+
+## Iterative Training Loop
+
+Use `rl loop` to run the full infrastructure cycle per iteration:
+- candidate deck pool resolution,
+- self-play simulation + raw match logs,
+- `(state, action, outcome)` dataset build,
+- policy/value training,
+- candidate evaluation ranking.
+
+```bash
+python -m sim_harness.cli rl loop \
+  --candidate my-candidate \
+  --include-candidate-store-pool \
+  --opponents all \
+  --iterations 5 \
+  --games 25 \
+  --policies heuristic,mcts \
+  --mcts-iterations 24 \
+  --mcts-max-depth 18 \
+  --epochs 12 \
+  --batch-size 512 \
+  --eval-policy mcts \
+  --eval-games 30 \
+  --advance-candidate-on-eval
+```
+
+Optional hooks:
+- `--deck-generator-cmd "..."` runs at the start of each iteration.
+- `--post-train-hook "..."` runs after training each iteration.
+
+Hook environment variables:
+- `DECKXPERT_LOOP_ITERATION`
+- `DECKXPERT_LOOP_RUN_DIR`
+- `DECKXPERT_LOOP_STAGE`
+- `DECKXPERT_LOOP_MODEL_PATH` (post-train)
+- `DECKXPERT_LOOP_DATASET_PATH` (post-train)
+- `DECKXPERT_LOOP_VOCAB_PATH` (post-train)
+- `DECKXPERT_LOOP_BEST_CANDIDATE` (post-train)
+
+Loop outputs are stored in:
+- `sim_harness/data/rl/loops/<run-id>/run.meta.json`
+- `sim_harness/data/rl/loops/<run-id>/iteration_###/collect/*`
+- `sim_harness/data/rl/loops/<run-id>/iteration_###/train/policy_value.pt`
+- `sim_harness/data/rl/loops/<run-id>/iteration_###/eval/candidate_ranking.json`
+- `sim_harness/data/rl/loops/<run-id>/run_summary.json`
 
 ## Rule/Engine Notes
 
