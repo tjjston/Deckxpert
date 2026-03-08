@@ -498,7 +498,7 @@ async function viewMlJob(jobId,focus=true){
     }
     if(logs){
       const lines=Array.isArray(job.logs)?job.logs:[];
-      logs.textContent=lines.join('\n') || '(no logs yet)';
+      logs.textContent=lines.join('\\n') || '(no logs yet)';
       if(focus) logs.scrollTop=logs.scrollHeight;
     }
   }catch(e){
