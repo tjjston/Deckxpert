@@ -324,7 +324,26 @@ function renderMatchDecks(decks){
 }
 function renderDecks(decks){const tb=document.getElementById('decksTbody');tb.innerHTML='';decks.forEach(d=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${d.deck_id}</td><td>${d.pool}</td><td>${d.name}</td><td>${d.deck_size}</td><td><button onclick=\"showDeck('${d.deck_id}')\">View</button> <button onclick=\"deleteDeck('${d.deck_id}')\" style=\"background:#b91c1c;border-color:#b91c1c\">Remove</button></td>`;tb.appendChild(tr);});}
 function renderSims(sims){const tb=document.getElementById('simsTbody');tb.innerHTML='';sims.forEach(s=>{const tr=document.createElement('tr');const wr=((s.overall?.win_rate||0)*100).toFixed(2)+'%';const illegal=Number(s.overall?.illegal_actions||0);tr.innerHTML=`<td>${s.sim_id}</td><td>${s.candidate_deck_id}</td><td>${wr}</td><td>${s.overall?.games||0}</td><td>${illegal}</td><td><button onclick=\"showSim('${s.sim_id}')\">Analyze</button></td>`;tb.appendChild(tr);});}
-async function uploadDeck(){const msg=document.getElementById('uploadMsg');msg.textContent='Uploading...';try{await api('/api/decks',{method:'POST',body:JSON.stringify({deck_id:document.getElementById('deckId').value||null,pool:document.getElementById('pool').value,swudb:JSON.parse(document.getElementById('deckJson').value)})});msg.textContent='Uploaded';await refreshAll();}catch(e){msg.textContent='Error: '+e.message;}}
+async function uploadDeck(){
+  const msg=document.getElementById('uploadMsg');
+  msg.textContent='Uploading...';
+  try{
+    const raw=document.getElementById('deckJson').value;
+    let swudb={};
+    try{
+      swudb=JSON.parse(raw);
+    }catch(parseErr){
+      msg.textContent='Error: Invalid JSON. '+parseErr.message;
+      return;
+    }
+    const out=await api('/api/decks',{method:'POST',body:JSON.stringify({deck_id:document.getElementById('deckId').value||null,pool:document.getElementById('pool').value,swudb})});
+    const warnings=Array.isArray(out?.warnings)?out.warnings:[];
+    msg.textContent=warnings.length?('Uploaded with warning: '+warnings.join(' ')):'Uploaded';
+    await refreshAll();
+  }catch(e){
+    msg.textContent='Error: '+e.message;
+  }
+}
 async function deleteDeck(id){
   if(!id) return;
   const ok=window.confirm(`Delete deck '${id}' from local list?`);
@@ -2596,6 +2615,7 @@ class SimWebHandler(BaseHTTPRequestHandler):
                 swudb = payload.get("swudb")
                 if not isinstance(swudb, dict):
                     raise ValueError("swudb must be a JSON object")
+                swudb, warnings = cli._normalize_swudb_deck(swudb)
                 cli._validate_swudb_deck(swudb)
                 decks = cli._load_decks()
                 deck_id = payload.get("deck_id") or uuid.uuid4().hex[:12]
@@ -2607,7 +2627,7 @@ class SimWebHandler(BaseHTTPRequestHandler):
                 deck = cli.DeckRecord(deck_id=deck_id, pool=pool, swudb=swudb, added_at=cli._now_iso())
                 decks.append(deck)
                 cli._save_decks(decks)
-                self._send_json({"ok": True, "deck_id": deck.deck_id, "name": deck.name})
+                self._send_json({"ok": True, "deck_id": deck.deck_id, "name": deck.name, "warnings": warnings})
                 return
 
             if path == "/api/simulations":

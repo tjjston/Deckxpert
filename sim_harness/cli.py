@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import re
 import statistics
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +18,7 @@ from .runner import MatchResult, run_benchmark
 DATA_DIR = Path("sim_harness") / "data"
 DECKS_FILE = DATA_DIR / "decks.json"
 SIMS_FILE = DATA_DIR / "simulations.json"
+GENERATED_CARD_DICT_FILE = Path("GeneratedCode") / "GeneratedCardDictionaries.php"
 SUPPORTED_MIN_DECK_SIZES = {30, 50}
 DEFAULT_MIN_DECK_SIZE = 50
 SUPPORTED_POLICIES = ("random_legal", "random_non_pass", "first_non_pass", "heuristic", "mcts")
@@ -76,12 +80,141 @@ def _write_json_list(path: Path, payload: list[dict[str, Any]]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+@lru_cache(maxsize=1)
+def _known_base_set_ids() -> set[str]:
+    """Best-effort extraction of base set IDs from generated dictionaries."""
+    if not GENERATED_CARD_DICT_FILE.exists():
+        return set()
+
+    text = GENERATED_CARD_DICT_FILE.read_text(encoding="utf-8", errors="ignore")
+
+    uuid_start = text.find("function UUIDLookup(")
+    uuid_end = text.find("function CardIDLookup(")
+    type_start = text.find("function DefinedCardType(")
+    type_end = text.find("function DefinedCardType2(")
+    if min(uuid_start, uuid_end, type_start, type_end) < 0:
+        return set()
+
+    uuid_block = text[uuid_start:uuid_end]
+    type_block = text[type_start:type_end]
+
+    uuid_by_set = {
+        m.group(1): m.group(2).lower()
+        for m in re.finditer(r"'([A-Z0-9]+_[0-9]{3})'\s*=>\s*'([0-9a-fA-F]+)'", uuid_block)
+    }
+    base_uuids = {
+        m.group(1).strip("'").lower()
+        for m in re.finditer(r"([0-9]+|'[0-9a-fA-F]+')\s*=>\s*'Base'", type_block)
+    }
+    return {set_id for set_id, uuid_id in uuid_by_set.items() if uuid_id in base_uuids}
+
+
+def _extract_set_id(card: dict[str, Any]) -> str:
+    return str(card.get("id", "")).strip()
+
+
+def _extract_count(card: dict[str, Any]) -> int:
+    try:
+        return int(card.get("count", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _remove_one_copy(swudb: dict[str, Any], set_id: str) -> bool:
+    for zone in ("deck", "sideboard"):
+        cards = swudb.get(zone, [])
+        if not isinstance(cards, list):
+            continue
+        for idx, card in enumerate(cards):
+            if not isinstance(card, dict):
+                continue
+            if _extract_set_id(card) != set_id:
+                continue
+            count = _extract_count(card)
+            if count <= 0:
+                continue
+            if count == 1:
+                del cards[idx]
+            else:
+                card["count"] = count - 1
+            return True
+    return False
+
+
+def _normalize_swudb_deck(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """
+    Normalizes accepted SWUDB payload variants before validation.
+
+    If `base` is missing, we infer it only when exactly one known base card
+    appears in deck/sideboard entries.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("swudb must be a JSON object")
+
+    swudb: dict[str, Any] = copy.deepcopy(payload)
+    warnings: list[str] = []
+
+    base = swudb.get("base")
+    if isinstance(base, dict):
+        base_id = str(base.get("id", "")).strip()
+        if base_id:
+            base["id"] = base_id
+            try:
+                base_count = int(base.get("count", 1) or 1)
+            except (TypeError, ValueError):
+                base_count = 1
+            base["count"] = max(1, base_count)
+            return swudb, warnings
+
+    known_bases = _known_base_set_ids()
+    candidates: list[str] = []
+    for zone in ("deck", "sideboard"):
+        cards = swudb.get(zone, [])
+        if not isinstance(cards, list):
+            continue
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            set_id = _extract_set_id(card)
+            if not set_id or _extract_count(card) < 1:
+                continue
+            if set_id in known_bases and set_id not in candidates:
+                candidates.append(set_id)
+
+    if len(candidates) == 1:
+        inferred = candidates[0]
+        swudb["base"] = {"id": inferred, "count": 1}
+        if _remove_one_copy(swudb, inferred):
+            warnings.append(
+                f"Base was inferred as {inferred} from deck data and removed from card entries."
+            )
+        else:
+            warnings.append(f"Base was inferred as {inferred} from deck data.")
+        return swudb, warnings
+
+    if len(candidates) > 1:
+        joined = ", ".join(candidates)
+        raise ValueError(
+            "Missing SWUDB field: base. Multiple possible base cards were found "
+            f"({joined}); add an explicit `base` object."
+        )
+
+    raise ValueError(
+        "Missing SWUDB field: base. Add `\"base\": {\"id\": \"<SET_###>\", \"count\": 1}` "
+        "to your deck JSON."
+    )
+
+
 
 def _validate_swudb_deck(payload: dict[str, Any]) -> None:
     required_top = ["metadata", "leader", "base", "deck"]
     for key in required_top:
         if key not in payload:
             raise ValueError(f"Missing SWUDB field: {key}")
+
+    base = payload.get("base")
+    if not isinstance(base, dict) or not str(base.get("id", "")).strip():
+        raise ValueError("SWUDB field `base` must be an object like {\"id\":\"SET_###\",\"count\":1}")
 
     if not isinstance(payload["deck"], list) or len(payload["deck"]) == 0:
         raise ValueError("SWUDB deck list must be a non-empty array")
@@ -185,17 +318,20 @@ def _delete_deck(deck_id: str) -> DeckRecord:
 def cmd_deck_upload(args: argparse.Namespace) -> int:
     decks = _load_decks()
     payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
-    _validate_swudb_deck(payload)
+    normalized, warnings = _normalize_swudb_deck(payload)
+    _validate_swudb_deck(normalized)
 
     deck_id = args.deck_id or uuid.uuid4().hex[:12]
     if any(d.deck_id == deck_id for d in decks):
         raise ValueError(f"Deck id already exists: {deck_id}")
 
-    record = DeckRecord(deck_id=deck_id, pool=args.pool, swudb=payload, added_at=_now_iso())
+    record = DeckRecord(deck_id=deck_id, pool=args.pool, swudb=normalized, added_at=_now_iso())
     decks.append(record)
     _save_decks(decks)
 
     print(f"Uploaded deck {record.deck_id} :: {record.name} [{record.pool}] by {record.author}")
+    for warning in warnings:
+        print(f"warning: {warning}")
     return 0
 
 
