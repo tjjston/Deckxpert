@@ -1,1 +1,93 @@
-[]
+[
+  {
+    "sim_id": "sim-20260311-034251",
+    "created_at": "2026-03-11T03:42:51.560325+00:00",
+    "candidate_deck_id": "mechanics_probe",
+    "candidate_name": "Mechanics Probe (Keywords + Force + Leader)",
+    "opponent_set": "starter",
+    "games_per_opponent": 1,
+    "seed": 42,
+    "workers": 1,
+    "policy": "heuristic",
+    "mcts_iterations": 16,
+    "mcts_max_depth": 14,
+    "min_cards": 50,
+    "overall": {
+      "games": 3,
+      "wins": 2,
+      "losses": 1,
+      "win_rate": 0.6667,
+      "illegal_actions": 0,
+      "matches_with_illegal": 0
+    },
+    "opponents": [
+      {
+        "deck_id": "a9e871bf8163",
+        "deck_name": "Luke Starter, Improved with C/U",
+        "pool": "starter",
+        "games": 1,
+        "wins": 0,
+        "win_rate": 0.0,
+        "avg_turns": 12.0,
+        "illegal_actions": 0,
+        "matches_with_illegal": 0
+      },
+      {
+        "deck_id": "975c4ccb3e4f",
+        "deck_name": "Vader Starter, Improved with C/U",
+        "pool": "starter",
+        "games": 1,
+        "wins": 1,
+        "win_rate": 1.0,
+        "avg_turns": 5.0,
+        "illegal_actions": 0,
+        "matches_with_illegal": 0
+      },
+      {
+        "deck_id": "3c5323a8cb5f",
+        "deck_name": "Ahsoka Starter \u2013 TWI Upgrade",
+        "pool": "starter",
+        "games": 1,
+        "wins": 1,
+        "win_rate": 1.0,
+        "avg_turns": 12.0,
+        "illegal_actions": 0,
+        "matches_with_illegal": 0
+      }
+    ],
+    "illegal_move_audit": {
+      "total_illegal_actions": 0,
+      "matches_with_illegal": 0,
+      "by_action_type": {},
+      "by_phase": {},
+      "by_player": {},
+      "by_opponent": [
+        {
+          "deck_id": "3c5323a8cb5f",
+          "deck_name": "Ahsoka Starter \u2013 TWI Upgrade",
+          "pool": "starter",
+          "games": 1,
+          "illegal_actions": 0,
+          "matches_with_illegal": 0
+        },
+        {
+          "deck_id": "975c4ccb3e4f",
+          "deck_name": "Vader Starter, Improved with C/U",
+          "pool": "starter",
+          "games": 1,
+          "illegal_actions": 0,
+          "matches_with_illegal": 0
+        },
+        {
+          "deck_id": "a9e871bf8163",
+          "deck_name": "Luke Starter, Improved with C/U",
+          "pool": "starter",
+          "games": 1,
+          "illegal_actions": 0,
+          "matches_with_illegal": 0
+        }
+      ],
+      "rows": []
+    }
+  }
+]

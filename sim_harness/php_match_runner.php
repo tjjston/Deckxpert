@@ -64,7 +64,7 @@ register_shutdown_function(function (): void {
 require_once __DIR__ . '/../Engine/HeadlessEngine.php';
 $GLOBALS['__runner_checkpoint'] = 'required_engine';
 
-$options = getopt('', ['seed:', 'deck-a:', 'deck-b:', 'deck-a-b64:', 'deck-b-b64:', 'match-id:', 'log-format::', 'max-actions::', 'policy::', 'mcts-iterations::', 'mcts-max-depth::']);
+$options = getopt('', ['seed:', 'deck-a:', 'deck-b:', 'deck-a-b64:', 'deck-b-b64:', 'match-id:', 'log-format:', 'max-actions:', 'policy:', 'mcts-iterations:', 'mcts-max-depth:', 'replay-only']);
 $seed = intval($options['seed'] ?? 0);
 $deckAInput = strval($options['deck-a'] ?? 'deck_a');
 $deckBInput = strval($options['deck-b'] ?? 'deck_b');
@@ -83,6 +83,8 @@ $logFormat = $options['log-format'] ?? 'json';
 $maxActions = max(0, intval($options['max-actions'] ?? 0));
 $hardActionCap = 20000;
 $actionCap = $maxActions > 0 ? min($maxActions, $hardActionCap) : $hardActionCap;
+$replayOnly = array_key_exists('replay-only', $options);
+$includeDetailedEvents = !$replayOnly;
 $policy = strtolower(trim(strval($options['policy'] ?? 'random_legal')));
 $mctsIterations = max(1, min(128, intval($options['mcts-iterations'] ?? 16)));
 $mctsMaxDepth = max(1, min(120, intval($options['mcts-max-depth'] ?? 14)));
@@ -93,6 +95,13 @@ $mctsConfig = [
 if (!in_array($policy, ['random_non_pass', 'random_legal', 'first_non_pass', 'heuristic', 'mcts'], true)) {
   $policy = 'random_legal';
 }
+
+$runnerBaseDir = trim(strval(getenv('SIM_RUNNER_BASE_DIR') ?: '.'));
+if ($runnerBaseDir === '') $runnerBaseDir = '.';
+$runnerBaseDir = rtrim($runnerBaseDir, "/\\");
+if ($runnerBaseDir === '') $runnerBaseDir = '.';
+$gamesRoot = $runnerBaseDir . '/Games';
+if (!is_dir($gamesRoot)) @mkdir($gamesRoot, 0777, true);
 
 $deckA = normalizeDecklistForHeadless($deckAInput);
 $deckB = normalizeDecklistForHeadless($deckBInput);
@@ -139,17 +148,32 @@ if (count($unknownDeckCardIds) > 0) {
 }
 $GLOBALS['__runner_checkpoint'] = 'normalized_decks';
 
-$gameName = 'sim_' . $matchID;
-$GLOBALS['gameName'] = $gameName;
-if (!is_dir("./Games/$gameName")) mkdir("./Games/$gameName", 0700, true);
-CreateLog($gameName);
-SetMatchSeed(strval($seed), $gameName);
+$simGameName = 'sim_' . $matchID;
+$gameName = $simGameName;
+$GLOBALS['gameName'] = $simGameName;
+if (!is_dir("$gamesRoot/$simGameName")) mkdir("$gamesRoot/$simGameName", 0777, true);
+CreateLog($simGameName, $runnerBaseDir . '/');
+SetMatchSeed(strval($seed));
 if ($logFormat === 'json') SetStructuredLogMode(true);
 
 initHeadlessGame($deckA, $deckB, $seed);
-$GLOBALS['gameName'] = $gameName;
+$gameName = $simGameName;
+$GLOBALS['gameName'] = $simGameName;
 $GLOBALS['__runner_checkpoint'] = 'initialized_game';
 $openingState = phaseSnapshot();
+$replayOrigGamestatePath = "$gamesRoot/$simGameName/origgamestate.txt";
+$replayCommandfilePath = "$gamesRoot/$simGameName/commandfile.txt";
+$oldFilename = $filename ?? null;
+$oldPlayerID = $playerID ?? null;
+$filename = $replayOrigGamestatePath;
+$playerID = 1;
+ob_start();
+include __DIR__ . '/../WriteGamestate.php';
+ob_end_clean();
+if ($oldFilename === null) unset($filename);
+else $filename = $oldFilename;
+if ($oldPlayerID === null) unset($playerID);
+else $playerID = $oldPlayerID;
 
 function actionEntropyKey(int $playerId, array $action): string
 {
@@ -767,6 +791,26 @@ function groupedEventsByRound(array $events): array
   }
   ksort($pages, SORT_NUMERIC);
   return array_values($pages);
+}
+
+function sanitizeReplayToken(mixed $value): string
+{
+  return str_replace(["\r", "\n"], '', strval($value ?? ''));
+}
+
+function formatReplayCommandLine(int $playerId, array $action): string
+{
+  $mode = intval($action['mode'] ?? 0);
+  $buttonInput = sanitizeReplayToken($action['buttonInput'] ?? '');
+  $cardID = sanitizeReplayToken($action['cardID'] ?? '');
+  $chkCount = max(0, intval($action['chkCount'] ?? 0));
+  $chkInputRaw = $action['chkInput'] ?? [];
+  if (!is_array($chkInputRaw)) $chkInputRaw = [];
+  $chkInput = [];
+  foreach ($chkInputRaw as $value) {
+    $chkInput[] = sanitizeReplayToken($value);
+  }
+  return $playerId . ' ' . $mode . ' ' . $buttonInput . ' ' . $cardID . ' ' . $chkCount . ' ' . implode('|', $chkInput);
 }
 
 function resolveCardReferenceRaw(int $playerId, array $action): string
@@ -1774,6 +1818,7 @@ function boardStateSummary(array $snapshot): array
 }
 
 $events = [];
+$executedActionCount = 0;
 $illegalActions = 0;
 $forcedPasses = 0;
 $noOpFilteredActions = 0;
@@ -1783,6 +1828,7 @@ $lastChosenStableKey = '';
 $terminatedReason = '';
 $noLegalActionStreak = 0;
 $noOpBlacklistByState = [];
+$replayCommands = [];
 
 for ($step = 1; $step <= $actionCap; ++$step) {
   $GLOBALS['__runner_checkpoint'] = 'loop_step_' . $step;
@@ -1955,54 +2001,58 @@ for ($step = 1; $step <= $actionCap; ++$step) {
   }
 
   if ($chosen === null) break;
+  $executedActionCount++;
   if (!$ok) $illegalActions++;
+  else $replayCommands[] = formatReplayCommandLine($playerId, $chosen);
 
   $cardRefRaw = $chosenCardRefRawBefore;
   $cardRef = displayCardId($cardRefRaw);
   $cardCost = $cardRefRaw !== '' ? intval(CardCost($cardRefRaw)) : null;
   $cardType = $cardRefRaw !== '' ? strval(DefinedCardType($cardRefRaw)) : '';
 
-  $effects = deriveEffects($phaseBegin, $phaseEnd);
-  $actionDetails = summarizeActionDetails($phaseBegin, $phaseEnd, $chosen, $playerId, $cardRefRaw);
-  $openingHandP1 = zoneCardCount($openingState['player_1']['zones']['hand'] ?? [], HandPieces());
-  $openingHandP2 = zoneCardCount($openingState['player_2']['zones']['hand'] ?? [], HandPieces());
-  $effects['player_1']['opening_hand_count'] = $openingHandP1;
-  $effects['player_2']['opening_hand_count'] = $openingHandP2;
+  if ($includeDetailedEvents) {
+    $effects = deriveEffects($phaseBegin, $phaseEnd);
+    $actionDetails = summarizeActionDetails($phaseBegin, $phaseEnd, $chosen, $playerId, $cardRefRaw);
+    $openingHandP1 = zoneCardCount($openingState['player_1']['zones']['hand'] ?? [], HandPieces());
+    $openingHandP2 = zoneCardCount($openingState['player_2']['zones']['hand'] ?? [], HandPieces());
+    $effects['player_1']['opening_hand_count'] = $openingHandP1;
+    $effects['player_2']['opening_hand_count'] = $openingHandP2;
 
-  $event = [
-    'step' => $step,
-    'round' => $round,
-    'phase' => $phase,
-    'player' => $playerId,
-    'action' => $chosen,
-    'is_decision' => isDecisionLikeAction($chosen),
-    'card' => [
-      'id' => $cardRef,
-      'raw_id' => $cardRefRaw,
-      'cost' => $cardCost,
-      'type' => $cardType,
-      'keywords' => ($cardRefRaw !== '' ? cardKeywordFlags($cardRefRaw, $playerId) : []),
-    ],
-    'legal_actions' => $legalActions,
-    'legal_action_count' => count($legalActions),
-    'legal_actions_by_type' => legalActionTypeSummary($legalActions),
-    'apply_ok' => $ok,
-    'message' => strval($result['message'] ?? ''),
-    'next_player' => intval($GLOBALS['currentPlayer'] ?? $playerId),
-    'next_phase' => strval(($GLOBALS['turn'][0] ?? '-')),
-    'initiative_player' => intval($GLOBALS['initiativePlayer'] ?? 0),
-    'initiative_taken' => intval($GLOBALS['initiativeTaken'] ?? 0),
-    'phase_state_begin' => $phaseBegin,
-    'phase_state_end' => $phaseEnd,
-    'board_state_begin' => boardStateSummary($phaseBegin),
-    'board_state_end' => boardStateSummary($phaseEnd),
-    'action_details' => $actionDetails,
-    'effects' => $effects,
-  ];
-  $events[] = $event;
+    $event = [
+      'step' => $step,
+      'round' => $round,
+      'phase' => $phase,
+      'player' => $playerId,
+      'action' => $chosen,
+      'is_decision' => isDecisionLikeAction($chosen),
+      'card' => [
+        'id' => $cardRef,
+        'raw_id' => $cardRefRaw,
+        'cost' => $cardCost,
+        'type' => $cardType,
+        'keywords' => ($cardRefRaw !== '' ? cardKeywordFlags($cardRefRaw, $playerId) : []),
+      ],
+      'legal_actions' => $legalActions,
+      'legal_action_count' => count($legalActions),
+      'legal_actions_by_type' => legalActionTypeSummary($legalActions),
+      'apply_ok' => $ok,
+      'message' => strval($result['message'] ?? ''),
+      'next_player' => intval($GLOBALS['currentPlayer'] ?? $playerId),
+      'next_phase' => strval(($GLOBALS['turn'][0] ?? '-')),
+      'initiative_player' => intval($GLOBALS['initiativePlayer'] ?? 0),
+      'initiative_taken' => intval($GLOBALS['initiativeTaken'] ?? 0),
+      'phase_state_begin' => $phaseBegin,
+      'phase_state_end' => $phaseEnd,
+      'board_state_begin' => boardStateSummary($phaseBegin),
+      'board_state_end' => boardStateSummary($phaseEnd),
+      'action_details' => $actionDetails,
+      'effects' => $effects,
+    ];
+    $events[] = $event;
+  }
 
   $GLOBALS['gameName'] = $gameName;
-  WriteLog('Sim step ' . $step, $playerId, false, './', !$ok, [
+  WriteLog('Sim step ' . $step, $playerId, false, $runnerBaseDir . '/', !$ok, [
     'action' => 'engine_apply_action',
     'result' => $ok ? 'ok' : 'illegal',
     'action_type' => strval($chosen['type'] ?? ''),
@@ -2019,9 +2069,14 @@ for ($step = 1; $step <= $actionCap; ++$step) {
   ]);
 }
 
-if ($terminatedReason === '' && count($events) >= $actionCap) {
+if ($terminatedReason === '' && $executedActionCount >= $actionCap) {
   $terminatedReason = 'action_cap_reached';
 }
+$replayCommandfileBody = '';
+if (count($replayCommands) > 0) {
+  $replayCommandfileBody = implode("\r\n", $replayCommands) . "\r\n";
+}
+file_put_contents($replayCommandfilePath, $replayCommandfileBody);
 $GLOBALS['__runner_checkpoint'] = 'building_response';
 
 $finalState = phaseSnapshot();
@@ -2031,15 +2086,17 @@ if (!$gameOver && boolval(IsGameOver()) && $terminatedReason === '') {
   $terminatedReason = 'engine_game_over_without_base_zero';
 }
 $turns = intval($GLOBALS['currentRound'] ?? 0);
-$roundPages = groupedEventsByRound($events);
+$roundPages = $includeDetailedEvents ? groupedEventsByRound($events) : [];
 $leaderActionTriggerCount = 0;
 $epicActionTriggerCount = 0;
-foreach ($events as $evt) {
-  if (!is_array($evt)) continue;
-  $d = $evt['action_details'] ?? null;
-  if (!is_array($d)) continue;
-  $leaderActionTriggerCount += is_array($d['leader_action_triggers'] ?? null) ? count($d['leader_action_triggers']) : 0;
-  $epicActionTriggerCount += is_array($d['epic_action_triggers'] ?? null) ? count($d['epic_action_triggers']) : 0;
+if ($includeDetailedEvents) {
+  foreach ($events as $evt) {
+    if (!is_array($evt)) continue;
+    $d = $evt['action_details'] ?? null;
+    if (!is_array($d)) continue;
+    $leaderActionTriggerCount += is_array($d['leader_action_triggers'] ?? null) ? count($d['leader_action_triggers']) : 0;
+    $epicActionTriggerCount += is_array($d['epic_action_triggers'] ?? null) ? count($d['epic_action_triggers']) : 0;
+  }
 }
 
 $response = [
@@ -2049,9 +2106,9 @@ $response = [
   'turns' => $turns,
   'deck_a' => $deckAInput,
   'deck_b' => $deckBInput,
-  'log_path' => LogPath($gameName),
+  'log_path' => LogPath($gameName, $runnerBaseDir . '/'),
   'stats' => [
-    'events' => count($events),
+    'events' => $executedActionCount,
     'illegal_actions' => $illegalActions,
     'game_over' => $gameOver,
     'policy' => $policy,
@@ -2083,9 +2140,15 @@ $response = [
       'resource_cards' => intval($openingState['player_2']['resources']['total_cards'] ?? 0),
     ],
   ],
-  'final_state' => $finalState,
-  'events' => $events,
-  'round_pages' => $roundPages,
+  'final_state' => ($includeDetailedEvents ? $finalState : (object)[]),
+  'events' => ($includeDetailedEvents ? $events : []),
+  'round_pages' => ($includeDetailedEvents ? $roundPages : []),
+  'replay' => [
+    'orig_gamestate_path' => $replayOrigGamestatePath,
+    'commandfile_path' => $replayCommandfilePath,
+    'command_count' => count($replayCommands),
+    'had_illegal_actions' => $illegalActions > 0,
+  ],
 ];
 
 $json = json_encode($response, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR);
@@ -2096,7 +2159,7 @@ if ($json === false) {
     'winner' => $winner,
     'turns' => intval($GLOBALS['currentRound'] ?? 0),
     'stats' => [
-      'events' => count($events),
+      'events' => $executedActionCount,
       'illegal_actions' => $illegalActions,
       'game_over' => $gameOver,
       'policy' => $policy,

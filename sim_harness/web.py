@@ -4,6 +4,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -63,6 +64,13 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 .attackTargetAction .attackTargetTag{font-size:10px;text-transform:uppercase;color:#fde68a}
 .attackTargetAction .attackTargetValue{font-size:12px;color:#ffffff}
 .logBox{min-height:220px;max-height:420px}
+.jobProgress{display:flex;align-items:center;gap:8px;min-width:190px}
+.jobProgress progress{width:120px;height:10px}
+.jobProgress span{font-size:11px;color:#cbd5e1}
+.loopBadge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;border:1px solid #475569}
+.loopDone{background:#14532d;color:#bbf7d0;border-color:#15803d}
+.loopNow{background:#1e3a8a;color:#bfdbfe;border-color:#2563eb}
+.loopPending{background:#1f2937;color:#cbd5e1;border-color:#475569}
 #cardHover{display:none;position:fixed;z-index:9999;pointer-events:none;background:#020617;border:1px solid #334155;border-radius:10px;padding:8px;box-shadow:0 12px 30px rgba(0,0,0,.45)}
 #cardHover img{height:min(46vh,520px);width:auto;display:block;border-radius:8px}
 #cardHover .meta{margin-top:6px;font-size:12px;color:#cbd5e1;max-width:260px}
@@ -209,9 +217,14 @@ SWU-specific early strategy:<br/>
 </div>
 </div>
 <h3>ML Job Queue</h3>
-<table><thead><tr><th>ID</th><th>Type</th><th>Status</th><th>GPU</th><th>Started</th><th>Ended</th><th>Exit</th><th></th></tr></thead><tbody id=\"mlJobsTbody\"></tbody></table>
+<table><thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Progress</th><th>GPU</th><th>Started</th><th>Ended</th><th>Exit</th><th></th></tr></thead><tbody id=\"mlJobsTbody\"></tbody></table>
 <div class=\"muted\" id=\"mlJobMeta\">Select a job to view full logs.</div>
 <pre id=\"mlJobLogs\" class=\"logBox\">No job selected.</pre>
+<h3>Training Progress Tracker</h3>
+<div id=\"mlLoopStatus\" class=\"muted\">Loading loop progression...</div>
+<div id=\"mlLoopNext\" class=\"muted\">Next action loading...</div>
+<table><thead><tr><th>Iteration</th><th>Collect</th><th>Train</th><th>Evaluate</th><th>Finalize</th><th>Promote</th><th>Top Win Rate</th></tr></thead><tbody id=\"mlLoopIterTbody\"></tbody></table>
+<table><thead><tr><th>Run</th><th>Progress</th><th>Current Phase</th><th>Best Eval</th><th>Updated</th></tr></thead><tbody id=\"mlLoopRunsTbody\"></tbody></table>
 <h3>Learning Trends (Shootout)</h3>
 <div id=\"mlTrendInfo\" class=\"muted\">Loading trend data...</div>
 <table><thead><tr><th>Policy</th><th>Runs</th><th>Avg Win Rate</th><th>Best Win Rate</th><th>Last Win Rate</th><th>Avg Illegal</th></tr></thead><tbody id=\"mlTrendPolicyTbody\"></tbody></table>
@@ -239,6 +252,13 @@ SWU-specific early strategy:<br/>
 <input id=\"replayStepRange\" type=\"range\" min=\"0\" max=\"0\" value=\"0\" oninput=\"setReplayIndex(parseInt(this.value||'0',10))\"/>
 <span id=\"replayStepLabel\" class=\"muted\">No replay loaded.</span>
 </div>
+<div class=\"replayControls\" style=\"margin-top:8px;\">
+<label style=\"margin:0;\">Arena Base URL</label>
+<input id=\"arenaReplayBaseUrl\" placeholder=\"http://localhost:8080/Arena\" style=\"min-width:320px;flex:1;\"/>
+<button id=\"openArenaReplayBtn\" onclick=\"openArenaReplayFromLatestSingleMatch()\">Open In Arena Replay</button>
+<button onclick=\"openArenaReplayLibrary()\">Open Arena Replay Library</button>
+<span id=\"arenaReplayMsg\" class=\"muted\"></span>
+</div>
 <div class=\"replayGrid\">
 <div class=\"replayPanel\"><h4>Move</h4><pre id=\"replayEvent\">Run a single match to populate replay.</pre></div>
 <div class=\"replayPanel\"><h4>Board + Hands</h4><pre id=\"replayBoard\">Run a single match to populate replay.</pre></div>
@@ -252,6 +272,7 @@ const DECISION_TYPES = new Set(['yesno','decision','choose_zone','choose_deck','
 const SUMMARY_COLLAPSE_KEY = 'deckxpert_match_summary_collapsed';
 const MATCH_PREFS_KEY = 'deckxpert_single_match_prefs';
 const DASHBOARD_TAB_KEY = 'deckxpert_dashboard_active_tab';
+const ARENA_REPLAY_BASE_KEY = 'deckxpert_arena_replay_base_url';
 let currentMatchEvents = [];
 let roundNumbers = [];
 let currentRoundPage = 0;
@@ -263,6 +284,7 @@ let mlRefreshTimer = null;
 let editingDeckId = '';
 let activeTab = 'deck';
 let replayIndex = 0;
+let latestSingleMatchSummary = null;
 
 function loadMatchPrefs(){
   try{
@@ -775,6 +797,107 @@ function renderMlTrends(payload){
     });
   }
 }
+function loopPhaseLabel(phase){
+  const p=String(phase||'').toLowerCase();
+  if(p==='collect') return 'Collect';
+  if(p==='train') return 'Train';
+  if(p==='evaluate') return 'Evaluate';
+  if(p==='finalize') return 'Finalize';
+  if(p==='complete') return 'Complete';
+  if(p==='') return '-';
+  return p;
+}
+function loopStepBadge(done,isNow){
+  if(isNow) return '<span class=\"loopBadge loopNow\">in progress</span>';
+  if(done) return '<span class=\"loopBadge loopDone\">done</span>';
+  return '<span class=\"loopBadge loopPending\">pending</span>';
+}
+function renderMlLoopProgress(payload){
+  const status=document.getElementById('mlLoopStatus');
+  const next=document.getElementById('mlLoopNext');
+  const iterTb=document.getElementById('mlLoopIterTbody');
+  const runsTb=document.getElementById('mlLoopRunsTbody');
+  if(!status || !next || !iterTb || !runsTb) return;
+
+  const latest=(payload && typeof payload.latest_run==='object')?payload.latest_run:null;
+  const active=(payload && typeof payload.active_job==='object')?payload.active_job:{};
+  const step=(payload && typeof payload.current_step==='object')?payload.current_step:{};
+  const activeInfo=(active.job_id)?` | Active job: ${active.job_id} (${active.job_type||''}, ${active.status||''})`:'';
+
+  if(!latest){
+    status.textContent='No RL loop run detected yet.'+activeInfo;
+  }else{
+    const req=Number(latest.iterations_requested||0);
+    const done=Number(latest.iterations_completed||0);
+    const stepIter=Number(step.iteration||0);
+    const stepLabel=loopPhaseLabel(step.phase);
+    const runId=String(latest.run_id||'');
+    status.textContent=`Run: ${runId} | Iterations: ${done}/${req||'?'} | Current: iteration ${stepIter||'-'} ${stepLabel}${activeInfo}`;
+  }
+  next.textContent=String(payload?.next_action||'No guidance available.');
+
+  iterTb.innerHTML='';
+  if(!latest){
+    const tr=document.createElement('tr');
+    tr.innerHTML='<td colspan=\"7\" class=\"muted\">No loop iterations to display.</td>';
+    iterTb.appendChild(tr);
+  }else{
+    const rows=Array.isArray(latest.iterations)?latest.iterations:[];
+    if(rows.length===0){
+      const tr=document.createElement('tr');
+      tr.innerHTML='<td colspan=\"7\" class=\"muted\">No iteration artifacts yet for this run.</td>';
+      iterTb.appendChild(tr);
+    }else{
+      const currentIter=Number(step.iteration||0);
+      const currentPhase=String(step.phase||'').toLowerCase();
+      rows.forEach(row=>{
+        const iter=Number(row.iteration||0);
+        const collectNow=(iter===currentIter && currentPhase==='collect');
+        const trainNow=(iter===currentIter && currentPhase==='train');
+        const evalNow=(iter===currentIter && currentPhase==='evaluate');
+        const finalizeNow=(iter===currentIter && currentPhase==='finalize');
+        const topWr=Number(row.top_eval_win_rate);
+        const topWrText=Number.isFinite(topWr)?`${(topWr*100).toFixed(2)}%`:'-';
+        const promoteText=Boolean(row.promoted)
+          ? '<span class=\"loopBadge loopDone\">promoted</span>'
+          : (Boolean(row.report_done)?'<span class=\"loopBadge loopPending\">kept</span>':'-');
+        const tr=document.createElement('tr');
+        tr.innerHTML=`<td>${iter}</td><td>${loopStepBadge(Boolean(row.collect_done),collectNow)}</td><td>${loopStepBadge(Boolean(row.train_done),trainNow)}</td><td>${loopStepBadge(Boolean(row.eval_done),evalNow)}</td><td>${loopStepBadge(Boolean(row.report_done),finalizeNow)}</td><td>${promoteText}</td><td>${topWrText}</td>`;
+        iterTb.appendChild(tr);
+      });
+    }
+  }
+
+  runsTb.innerHTML='';
+  const runs=Array.isArray(payload?.recent_runs)?payload.recent_runs:[];
+  if(runs.length===0){
+    const tr=document.createElement('tr');
+    tr.innerHTML='<td colspan=\"5\" class=\"muted\">No loop history yet.</td>';
+    runsTb.appendChild(tr);
+    return;
+  }
+  runs.forEach(run=>{
+    const req=Number(run.iterations_requested||0);
+    const done=Number(run.iterations_completed||0);
+    const wr=Number(run.best_eval_win_rate);
+    const wrText=Number.isFinite(wr)?`${(wr*100).toFixed(2)}%`:'-';
+    const updated=formatLocal(run.finished_at || run.created_at);
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${run.run_id||''}</td><td>${done}/${req||'?'}</td><td>${loopPhaseLabel(run.current_phase)}</td><td>${wrText}</td><td>${updated}</td>`;
+    runsTb.appendChild(tr);
+  });
+}
+async function refreshMlLoopProgress(){
+  try{
+    const out=await api('/api/ml/loop-progress');
+    renderMlLoopProgress(out);
+  }catch(e){
+    const status=document.getElementById('mlLoopStatus');
+    const next=document.getElementById('mlLoopNext');
+    if(status) status.textContent='Loop progression unavailable: '+e.message;
+    if(next) next.textContent='Check server logs and loop artifact paths.';
+  }
+}
 function renderMlJobs(jobs){
   const tb=document.getElementById('mlJobsTbody');
   if(!tb) return;
@@ -782,10 +905,23 @@ function renderMlJobs(jobs){
   const rows=Array.isArray(jobs)?jobs:[];
   if(rows.length===0){
     const tr=document.createElement('tr');
-    tr.innerHTML='<td colspan=\"8\" class=\"muted\">No ML jobs yet.</td>';
+    tr.innerHTML='<td colspan=\"9\" class=\"muted\">No ML jobs yet.</td>';
     tb.appendChild(tr);
     return;
   }
+  const renderProgress=(job)=>{
+    const p=(job && typeof job.progress==='object' && job.progress!==null)?job.progress:{};
+    const total=Math.max(0,Number(p.total||0));
+    const current=Math.max(0,Number(p.current||0));
+    const rawPercent=Number(p.percent);
+    if(!(total>0) && !Number.isFinite(rawPercent)){
+      return '<span class=\"muted\">-</span>';
+    }
+    const percent=Math.max(0,Math.min(100,Number.isFinite(rawPercent)?rawPercent:(total>0?(current/total)*100:0)));
+    const safeCurrent=(total>0)?Math.min(current,total):current;
+    const detail=(total>0)?` (${safeCurrent}/${total})`:'';
+    return `<div class=\"jobProgress\"><progress max=\"100\" value=\"${percent.toFixed(2)}\"></progress><span>${percent.toFixed(1)}%${detail}</span></div>`;
+  };
   rows.forEach(j=>{
     const tr=document.createElement('tr');
     const jid=String(j.job_id||'');
@@ -793,7 +929,7 @@ function renderMlJobs(jobs){
     const gpu=String(j.gpu_devices||'');
     const isActive=(status==='queued' || status==='running' || status==='stopping');
     const stopBtn=isActive?`<button style=\"background:#b91c1c;border-color:#b91c1c\" onclick=\"stopMlJob('${jid}')\">Stop</button>`:'';
-    tr.innerHTML=`<td>${jid}</td><td>${j.job_type||''}</td><td>${status}</td><td>${gpu||'-'}</td><td>${formatLocal(j.started_at)}</td><td>${formatLocal(j.ended_at)}</td><td>${j.exit_code===null?'-':j.exit_code}</td><td><button onclick=\"viewMlJob('${jid}')\">View</button> ${stopBtn}</td>`;
+    tr.innerHTML=`<td>${jid}</td><td>${j.job_type||''}</td><td>${status}</td><td>${renderProgress(j)}</td><td>${gpu||'-'}</td><td>${formatLocal(j.started_at)}</td><td>${formatLocal(j.ended_at)}</td><td>${j.exit_code===null?'-':j.exit_code}</td><td><button onclick=\"viewMlJob('${jid}')\">View</button> ${stopBtn}</td>`;
     tb.appendChild(tr);
   });
 }
@@ -813,6 +949,7 @@ async function refreshMlJobs(){
     if(currentMlJobId!==''){
       await viewMlJob(currentMlJobId,false);
     }
+    await refreshMlLoopProgress();
     await refreshMlTrends();
   }catch(_e){}
 }
@@ -835,7 +972,14 @@ async function viewMlJob(jobId,focus=true){
     const logs=document.getElementById('mlJobLogs');
     if(meta){
       const cmd=Array.isArray(job.command)?job.command.join(' '):'';
-      meta.textContent=`${job.job_id||jobId} | ${job.job_type||''} | status=${job.status||''} | exit=${job.exit_code===null?'-':job.exit_code} | ${cmd}`;
+      const p=(job && typeof job.progress==='object' && job.progress!==null)?job.progress:{};
+      const rawPercent=Number(p.percent);
+      const total=Math.max(0,Number(p.total||0));
+      const current=Math.max(0,Number(p.current||0));
+      const progressText=Number.isFinite(rawPercent)
+        ? ` | progress=${Math.max(0,Math.min(100,rawPercent)).toFixed(1)}%${total>0?` (${Math.min(current,total)}/${total})`:''}`
+        : '';
+      meta.textContent=`${job.job_id||jobId} | ${job.job_type||''} | status=${job.status||''} | exit=${job.exit_code===null?'-':job.exit_code}${progressText} | ${cmd}`;
     }
     if(logs){
       const lines=Array.isArray(job.logs)?job.logs:[];
@@ -2189,13 +2333,97 @@ function replayNext(){
   renderReplayStep();
 }
 
+function _defaultArenaBaseUrl(){
+  const proto=window.location.protocol||'http:';
+  const host=window.location.hostname||'localhost';
+  let port=window.location.port||'';
+  if(port===''||port==='8765') port='8080';
+  if((proto==='http:'&&port==='80')||(proto==='https:'&&port==='443')){
+    return `${proto}//${host}/Arena`;
+  }
+  return `${proto}//${host}:${port}/Arena`;
+}
+function _normalizeArenaBaseUrl(raw){
+  const trimmed=String(raw||'').trim();
+  if(trimmed==='') return '';
+  return trimmed.replace(/\/+$/,'');
+}
+function _readArenaBaseUrl(){
+  const input=document.getElementById('arenaReplayBaseUrl');
+  const typed=_normalizeArenaBaseUrl(input?.value||'');
+  if(typed!=='') return typed;
+  try{
+    const stored=_normalizeArenaBaseUrl(localStorage.getItem(ARENA_REPLAY_BASE_KEY)||'');
+    if(stored!=='') return stored;
+  }catch(_e){}
+  return _defaultArenaBaseUrl();
+}
+function _persistArenaBaseUrl(){
+  const input=document.getElementById('arenaReplayBaseUrl');
+  if(!input) return;
+  const normalized=_normalizeArenaBaseUrl(input.value||'');
+  input.value=normalized;
+  try{localStorage.setItem(ARENA_REPLAY_BASE_KEY,normalized);}catch(_e){}
+}
+function _setArenaReplayUiState(){
+  const btn=document.getElementById('openArenaReplayBtn');
+  if(btn) btn.disabled=!latestSingleMatchSummary;
+}
+function initArenaReplayControls(){
+  const input=document.getElementById('arenaReplayBaseUrl');
+  if(input){
+    input.value=_readArenaBaseUrl();
+    input.addEventListener('change',_persistArenaBaseUrl);
+    input.addEventListener('blur',_persistArenaBaseUrl);
+  }
+  _setArenaReplayUiState();
+}
+function openArenaReplayLibrary(){
+  const base=_readArenaBaseUrl();
+  const msg=document.getElementById('arenaReplayMsg');
+  const url=`${base}/Replays.php`;
+  window.open(url,'_blank');
+  if(msg) msg.textContent='Opened Arena replay tab in a new window.';
+}
+function openArenaReplayFromLatestSingleMatch(){
+  const msg=document.getElementById('arenaReplayMsg');
+  if(!latestSingleMatchSummary){
+    if(msg) msg.textContent='Run a single match first.';
+    return;
+  }
+  const base=_readArenaBaseUrl();
+  const deckA=String(latestSingleMatchSummary?.deck_a_id||'').trim();
+  const deckB=String(latestSingleMatchSummary?.deck_b_id||'').trim();
+  const policy=String(latestSingleMatchSummary?.policy||'heuristic').trim()||'heuristic';
+  const seed=Number(latestSingleMatchSummary?.seed||0);
+  const events=Number(latestSingleMatchSummary?.events||0);
+  if(deckA===''||deckB===''){
+    if(msg) msg.textContent='Latest single match metadata is missing deck ids.';
+    return;
+  }
+  const q=new URLSearchParams({
+    deckA,
+    deckB,
+    policy,
+    seed:String(Number.isFinite(seed)&&seed!==0?seed:123),
+  });
+  if(Number.isFinite(events) && events > 0){
+    q.set('maxActions', String(Math.max(50, Math.min(4000, Math.trunc(events)))));
+  }
+  const url=`${base}/CreateSimReplay.php?${q.toString()}`;
+  window.open(url,'_blank');
+  if(msg) msg.textContent='Opened Arena replay generator in a new window.';
+}
+
 async function runSingleMatch(){
   const msg=document.getElementById('matchMsg');
   const opening=document.getElementById('openingState');
+  const arenaReplayMsg=document.getElementById('arenaReplayMsg');
   hideCardHover();
   persistMatchPrefs();
   msg.textContent='Running match...';
   opening.textContent='';
+  if(arenaReplayMsg) arenaReplayMsg.textContent='';
   try{
     const d=await api('/api/match/run',{method:'POST',body:JSON.stringify({deck_a_id:document.getElementById('deckA').value,deck_b_id:document.getElementById('deckB').value,min_cards:parseInt(document.getElementById('matchMinCards').value||'50',10),policy:document.getElementById('matchPolicy').value,mcts_iterations:parseInt(document.getElementById('matchMctsIterations').value||'16',10),mcts_max_depth:parseInt(document.getElementById('matchMctsDepth').value||'14',10),seed:parseInt(document.getElementById('matchSeed').value||'123',10)})});
     msg.textContent='Done';
@@ -2205,6 +2433,8 @@ async function runSingleMatch(){
     const p1=o.player_1||{};
     const p2=o.player_2||{};
     opening.textContent=`Opening snapshot: P1 hand=${p1.hand_count ?? '?'} deck=${p1.deck_count ?? '?'} resources=${p1.resource_cards ?? '?'} | P2 hand=${p2.hand_count ?? '?'} deck=${p2.deck_count ?? '?'} resources=${p2.resource_cards ?? '?'}`;
+    latestSingleMatchSummary=d.summary||null;
+    _setArenaReplayUiState();
     currentMatchEvents=filteredEvents(d.events||[]);
     roundNumbers=[...new Set(currentMatchEvents.map(e=>Number(e.round)).filter(n=>Number.isFinite(n)&&n>0))].sort((a,b)=>a-b);
     currentRoundPage=0;
@@ -2219,6 +2449,8 @@ async function runSingleMatch(){
     document.getElementById('analysis').textContent='Single Match Analysis unavailable due to match run error.';
     renderKeywordAudit([]);
     renderValidationMatrix([]);
+    latestSingleMatchSummary=null;
+    _setArenaReplayUiState();
     currentMatchEvents=[];
     refreshReplayFromMatch();
   }
@@ -2227,6 +2459,7 @@ async function runSingleMatch(){
 initTabs();
 initUiState();
 initMatchPrefBindings();
+initArenaReplayControls();
 refreshReplayFromMatch();
 window.addEventListener('blur', hideCardHover);
 window.addEventListener('scroll', hideCardHover, {passive:true});
@@ -2716,6 +2949,248 @@ def _list_rl_artifacts(limit: int = 200) -> list[dict[str, Any]]:
     return artifacts
 
 
+def _read_json_dict(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _iteration_dir_name(iteration: int) -> str:
+    return f"iteration_{int(iteration):03d}"
+
+
+def _build_iteration_row(run_dir: Path, iteration: int) -> dict[str, Any]:
+    iter_dir = run_dir / _iteration_dir_name(iteration)
+    report = _read_json_dict(iter_dir / "iteration_report.json")
+    collect_done = bool(
+        (iter_dir / "collect" / "training_data.meta.json").exists()
+        or (iter_dir / "collect" / "training_data_replay.meta.json").exists()
+        or bool(report.get("collect"))
+    )
+    train_done = bool(
+        (iter_dir / "train" / "policy_value.pt").exists()
+        or (iter_dir / "train" / "policy_value.pt.meta.json").exists()
+        or bool(report.get("train"))
+    )
+    eval_done = bool(
+        (iter_dir / "eval" / "candidate_ranking.json").exists()
+        or bool((report.get("evaluation") or {}).get("ranked"))
+    )
+    report_done = bool(report)
+    promotion = report.get("promotion", {}) if isinstance(report.get("promotion"), dict) else {}
+    promoted = bool(promotion.get("promoted", False))
+    if not collect_done:
+        status = "pending"
+        next_step = "collect"
+    elif not train_done:
+        status = "collecting_done"
+        next_step = "train"
+    elif not eval_done:
+        status = "trained"
+        next_step = "evaluate"
+    elif not report_done:
+        status = "evaluated"
+        next_step = "finalize"
+    else:
+        status = "complete"
+        next_step = ""
+    top_eval_win_rate = (report.get("evaluation") or {}).get("top_eval_win_rate", None) if isinstance(report.get("evaluation"), dict) else None
+    try:
+        top_eval_win_rate = None if top_eval_win_rate is None else float(top_eval_win_rate)
+    except Exception:
+        top_eval_win_rate = None
+    return {
+        "iteration": int(iteration),
+        "collect_done": bool(collect_done),
+        "train_done": bool(train_done),
+        "eval_done": bool(eval_done),
+        "report_done": bool(report_done),
+        "promoted": bool(promoted),
+        "promotion_reason": str(promotion.get("reason", "")),
+        "top_eval_win_rate": top_eval_win_rate,
+        "status": status,
+        "next_step": next_step,
+    }
+
+
+def _active_ml_job_summary() -> dict[str, Any]:
+    for job in ML_JOB_MANAGER.list():
+        status = str(job.get("status", ""))
+        if status in {"queued", "running", "stopping"}:
+            return {
+                "job_id": str(job.get("job_id", "")),
+                "job_type": str(job.get("job_type", "")),
+                "status": status,
+                "progress": dict(job.get("progress") or {}),
+                "started_at": str(job.get("started_at", "")),
+            }
+    return {}
+
+
+def _phase_for_job_type(job_type: str) -> str:
+    jt = str(job_type or "").strip().lower()
+    if jt in {"sim_create", "sim_shootout", "rl_collect"}:
+        return "collect"
+    if jt == "rl_train":
+        return "train"
+    return ""
+
+
+def _build_loop_progress(limit_runs: int = 12, max_rows: int = 30) -> dict[str, Any]:
+    loops_dir = cli.DATA_DIR / "rl" / "loops"
+    active_job = _active_ml_job_summary()
+    if not loops_dir.exists():
+        next_action = (
+            "No RL loop runs found yet. Start with a short iteration 0 loop "
+            "(for example: 1 iteration, starter opponents, low game count) to bootstrap tracking."
+        )
+        if active_job:
+            phase = _phase_for_job_type(str(active_job.get("job_type", "")))
+            if phase:
+                next_action = f"Current step in progress: {phase}. Wait for active job {active_job.get('job_id', '')} to finish."
+        return {
+            "generated_at": _now_iso(),
+            "active_job": active_job,
+            "latest_run": None,
+            "recent_runs": [],
+            "current_step": {"phase": _phase_for_job_type(str(active_job.get("job_type", ""))), "iteration": 0},
+            "next_action": next_action,
+        }
+
+    run_dirs = [p for p in loops_dir.iterdir() if p.is_dir()]
+    run_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    recent_runs: list[dict[str, Any]] = []
+    latest_run_payload: dict[str, Any] | None = None
+    latest_step = {"phase": "", "iteration": 0}
+
+    for idx, run_dir in enumerate(run_dirs[: max(int(limit_runs), 1)]):
+        run_meta = _read_json_dict(run_dir / "run.meta.json")
+        run_summary = _read_json_dict(run_dir / "run_summary.json")
+        run_id = str(run_meta.get("run_id") or run_summary.get("run_id") or run_dir.name)
+        requested_raw = run_meta.get("iterations", run_summary.get("iterations_requested", 0))
+        try:
+            iterations_requested = max(int(requested_raw), 0)
+        except Exception:
+            iterations_requested = 0
+
+        max_iteration_seen = 0
+        for child in run_dir.iterdir():
+            if not child.is_dir():
+                continue
+            m = re.fullmatch(r"iteration_(\d{3})", child.name)
+            if not m:
+                continue
+            max_iteration_seen = max(max_iteration_seen, int(m.group(1)))
+        total_iterations = max(iterations_requested, max_iteration_seen)
+        try:
+            iterations_completed = int(run_summary.get("iterations_completed", 0))
+        except Exception:
+            iterations_completed = 0
+        iterations_completed = max(iterations_completed, 0)
+
+        if total_iterations <= 0:
+            phase = "collect"
+            step_iteration = 0
+            current_row: dict[str, Any] = {}
+        elif iterations_completed >= total_iterations:
+            phase = "complete"
+            step_iteration = int(total_iterations)
+            current_row = _build_iteration_row(run_dir, step_iteration)
+        else:
+            step_iteration = int(max(1, iterations_completed + 1))
+            current_row = _build_iteration_row(run_dir, step_iteration)
+            phase = str(current_row.get("next_step") or "collect")
+            if bool(current_row.get("report_done")) and step_iteration < total_iterations:
+                step_iteration += 1
+                current_row = _build_iteration_row(run_dir, step_iteration)
+                phase = str(current_row.get("next_step") or "collect")
+
+        if total_iterations > 0:
+            window_start = max(1, total_iterations - max(int(max_rows), 1) + 1)
+            iteration_rows = [_build_iteration_row(run_dir, i) for i in range(window_start, total_iterations + 1)]
+        else:
+            iteration_rows = []
+
+        run_payload = {
+            "run_id": run_id,
+            "run_dir": str(run_dir),
+            "created_at": str(run_meta.get("created_at", "")),
+            "finished_at": str(run_summary.get("finished_at", "")),
+            "iterations_requested": int(iterations_requested),
+            "iterations_completed": int(iterations_completed),
+            "final_active_candidate": str(run_summary.get("final_active_candidate", "")),
+            "best_eval_win_rate": run_summary.get("best_eval_win_rate", None),
+            "current_step": {
+                "phase": phase,
+                "iteration": int(step_iteration),
+            },
+            "iterations": iteration_rows,
+            "total_iterations_tracked": int(total_iterations),
+        }
+        recent_runs.append(
+            {
+                "run_id": run_id,
+                "created_at": run_payload["created_at"],
+                "finished_at": run_payload["finished_at"],
+                "iterations_requested": run_payload["iterations_requested"],
+                "iterations_completed": run_payload["iterations_completed"],
+                "best_eval_win_rate": run_payload["best_eval_win_rate"],
+                "current_phase": phase,
+                "run_dir": run_payload["run_dir"],
+            }
+        )
+        if idx == 0:
+            latest_run_payload = run_payload
+            latest_step = dict(run_payload.get("current_step", {}))
+
+    if active_job:
+        phase = _phase_for_job_type(str(active_job.get("job_type", "")))
+        if phase:
+            latest_step["phase"] = phase
+        next_action = f"Current step in progress: {latest_step.get('phase', 'running')}. Watch job logs for completion."
+    elif latest_run_payload is None:
+        next_action = "No RL loop runs found yet. Start an iteration 0 run to initialize progression tracking."
+    elif str(latest_step.get("phase", "")) == "complete":
+        next_action = (
+            "Latest loop run is complete. Review eval ranking and promoted best model, "
+            "then start the next loop run with scaled games/epochs."
+        )
+    else:
+        iter_no = int(latest_step.get("iteration", 0) or 0)
+        phase = str(latest_step.get("phase", "") or "collect")
+        next_action = (
+            f"Next expected step: iteration {iter_no} -> {phase}. "
+            "If no active ML job is running, start or restart an RL loop run."
+        )
+
+    return {
+        "generated_at": _now_iso(),
+        "active_job": active_job,
+        "latest_run": latest_run_payload,
+        "recent_runs": recent_runs,
+        "current_step": latest_step,
+        "next_action": next_action,
+    }
+
+
+_PROGRESS_LINE_RE = re.compile(
+    r"^\[progress\]\s+label=(?P<label>\S+)\s+current=(?P<current>\d+)\s+total=(?P<total>\d+)\s+percent=(?P<percent>\d+(?:\.\d+)?)$"
+)
+
+
+def _default_job_progress() -> dict[str, Any]:
+    return {
+        "label": "",
+        "current": 0,
+        "total": 0,
+        "percent": None,
+        "indeterminate": True,
+        "message": "",
+    }
+
+
 class MlJobManager:
     def __init__(self, max_jobs: int = 80, max_log_lines: int = 4000) -> None:
         self._max_jobs = int(max_jobs)
@@ -2739,6 +3214,7 @@ class MlJobManager:
             "command": list(job["command"]),
             "gpu_devices": job.get("gpu_devices", ""),
             "stop_requested": bool(job.get("stop_requested", False)),
+            "progress": dict(job.get("progress") or {}),
         }
         if include_logs:
             logs = job.get("logs", [])
@@ -2754,6 +3230,47 @@ class MlJobManager:
         over = len(logs) - self._max_log_lines
         if over > 0:
             del logs[:over]
+        self._apply_progress_line_locked(job, line)
+
+    def _apply_progress_line_locked(self, job: dict[str, Any], line: str) -> None:
+        match = _PROGRESS_LINE_RE.match(str(line or "").strip())
+        if not match:
+            return
+        total = max(int(match.group("total")), 0)
+        current = max(int(match.group("current")), 0)
+        if total > 0:
+            current = min(current, total)
+        percent = float(match.group("percent"))
+        percent = max(0.0, min(100.0, percent))
+        progress = job.setdefault("progress", _default_job_progress())
+        progress["label"] = str(match.group("label") or "")
+        progress["current"] = int(current)
+        progress["total"] = int(total)
+        progress["percent"] = float(percent)
+        progress["indeterminate"] = bool(total <= 0)
+        progress["message"] = f"{current}/{total}" if total > 0 else str(current)
+
+    def _finalize_progress_locked(self, job: dict[str, Any], status: str) -> None:
+        progress = job.setdefault("progress", _default_job_progress())
+        total = max(int(progress.get("total") or 0), 0)
+        current = max(int(progress.get("current") or 0), 0)
+        if status == "succeeded":
+            if total > 0:
+                current = total
+                progress["percent"] = 100.0
+                progress["indeterminate"] = False
+                progress["message"] = f"{current}/{total}"
+            else:
+                progress["message"] = "completed"
+                if progress.get("percent") is None:
+                    progress["percent"] = 100.0
+                    progress["indeterminate"] = False
+            progress["current"] = int(current)
+            progress["total"] = int(total)
+            return
+        progress["current"] = int(current)
+        progress["total"] = int(total)
+        progress["message"] = status
 
     def _prune_locked(self) -> None:
         active = {"queued", "running", "stopping"}
@@ -2789,6 +3306,7 @@ class MlJobManager:
             "gpu_devices": env_updates.get("CUDA_VISIBLE_DEVICES", ""),
             "stop_requested": False,
             "logs": [f"$ {' '.join(shlex.quote(part) for part in command)}"],
+            "progress": _default_job_progress(),
             "_proc": None,
         }
         with self._lock:
@@ -2857,6 +3375,7 @@ class MlJobManager:
                     job["status"] = "stopped"
                 else:
                     job["status"] = "succeeded" if int(code) == 0 else "failed"
+                self._finalize_progress_locked(job, str(job["status"]))
                 job["ended_at"] = _now_iso()
                 job["updated_at"] = job["ended_at"]
                 job["_proc"] = None
@@ -2870,6 +3389,7 @@ class MlJobManager:
                 job["error"] = str(exc)
                 self._append_log_locked(job, f"[runner_error] {exc}")
                 job["exit_code"] = -1
+                self._finalize_progress_locked(job, "failed")
                 job["ended_at"] = _now_iso()
                 job["updated_at"] = job["ended_at"]
                 job["_proc"] = None
@@ -2908,6 +3428,7 @@ class MlJobManager:
                 job["status"] = "stopped"
                 job["ended_at"] = job["updated_at"]
                 job["exit_code"] = -15
+                self._finalize_progress_locked(job, "stopped")
             else:
                 job["status"] = "stopping"
                 proc = job.get("_proc")
@@ -3031,6 +3552,9 @@ class SimWebHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/ml/trends":
                 self._send_json(cli._build_shootout_trends(limit=500))
+                return
+            if path == "/api/ml/loop-progress":
+                self._send_json(_build_loop_progress())
                 return
             if path.startswith("/api/ml/jobs/"):
                 job_id = path[len("/api/ml/jobs/") :].strip("/")
@@ -3234,6 +3758,7 @@ class SimWebHandler(BaseHTTPRequestHandler):
                         "opening": match.get("opening", {}),
                         "final_state": match.get("final_state", {}),
                     },
+                    "replay": match.get("replay", {}),
                     "events": match.get("events", []),
                     "round_pages": match.get("round_pages", []),
                 })

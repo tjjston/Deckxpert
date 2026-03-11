@@ -7,7 +7,7 @@ import os
 import random
 import shutil
 import subprocess
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -211,6 +211,23 @@ def _run_match_job(job: tuple[int, str, str, int, str | None, str, int | None, i
     )
 
 
+def _emit_progress_line(label: str, current: int, total: int) -> None:
+    safe_label = str(label or "benchmark").strip().replace(" ", "_")
+    if safe_label == "":
+        safe_label = "benchmark"
+    capped_total = max(int(total), 0)
+    capped_current = max(int(current), 0)
+    if capped_total > 0:
+        capped_current = min(capped_current, capped_total)
+        percent = (capped_current / capped_total) * 100.0
+    else:
+        percent = 0.0
+    print(
+        f"[progress] label={safe_label} current={capped_current} total={capped_total} percent={percent:.2f}",
+        flush=True,
+    )
+
+
 def run_benchmark(
     deck_pairs: list[tuple[str, str]],
     n_games: int,
@@ -218,6 +235,7 @@ def run_benchmark(
     workers: int = 4,
     output_jsonl: str | None = "sim_harness/artifacts/benchmark.jsonl",
     output_parquet: str | None = None,
+    progress_label: str | None = None,
 ) -> list[MatchResult]:
     global_seed = int(seed_policy.get("global_seed", 0))
     php_script = seed_policy.get("php_script")
@@ -241,8 +259,22 @@ def run_benchmark(
             ))
             match_id += 1
 
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(_run_match_job, jobs))
+    progress_name = str(progress_label or "").strip()
+    emit_progress = progress_name != ""
+    total_jobs = len(jobs)
+    completed = 0
+    results: list[MatchResult] = []
+
+    if total_jobs > 0:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_run_match_job, job) for job in jobs]
+            for future in as_completed(futures):
+                results.append(future.result())
+                completed += 1
+                if emit_progress:
+                    _emit_progress_line(progress_name, completed, total_jobs)
+
+    results.sort(key=lambda row: int(row.match_id))
 
     if output_jsonl:
         out_path = Path(output_jsonl)

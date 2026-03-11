@@ -234,8 +234,10 @@ Use `rl loop` to run the full infrastructure cycle per iteration:
 - candidate deck pool resolution,
 - self-play simulation + raw match logs,
 - `(state, action, outcome)` dataset build,
+- replay buffer update (sliding window of recent rows),
 - policy/value training,
-- candidate evaluation ranking.
+- candidate evaluation ranking,
+- best-model promotion gate (`win_rate >= threshold`).
 
 ```bash
 python -m sim_harness.cli rl loop \
@@ -244,15 +246,37 @@ python -m sim_harness.cli rl loop \
   --opponents all \
   --iterations 5 \
   --games 25 \
-  --policies heuristic,mcts \
+  --policies random_legal,heuristic,mcts \
   --mcts-iterations 24 \
   --mcts-max-depth 18 \
+  --replay-max-rows 500000 \
   --epochs 12 \
   --batch-size 512 \
   --eval-policy mcts \
   --eval-games 30 \
+  --promotion-threshold 0.55 \
+  --best-model-path sim_harness/data/rl/policy_value_best.pt \
   --advance-candidate-on-eval
 ```
+
+Recommended smoke-test pass (iteration 0):
+
+```bash
+python -m sim_harness.cli rl loop \
+  --candidate my-candidate \
+  --opponents starter \
+  --iterations 1 \
+  --games 8 \
+  --policies random_legal,heuristic \
+  --eval-policy random_legal \
+  --eval-games 10 \
+  --epochs 5 \
+  --replay-max-rows 10000
+```
+
+Current evaluation behavior:
+- promotion uses the top candidate deck's eval win rate against the selected opponent set;
+- true model-vs-model arena gating can be layered in later when inference-time model policies are wired into match execution.
 
 Optional hooks:
 - `--deck-generator-cmd "..."` runs at the start of each iteration.
@@ -263,9 +287,13 @@ Hook environment variables:
 - `DECKXPERT_LOOP_RUN_DIR`
 - `DECKXPERT_LOOP_STAGE`
 - `DECKXPERT_LOOP_MODEL_PATH` (post-train)
-- `DECKXPERT_LOOP_DATASET_PATH` (post-train)
-- `DECKXPERT_LOOP_VOCAB_PATH` (post-train)
+- `DECKXPERT_LOOP_DATASET_PATH` (raw per-iteration collect dataset)
+- `DECKXPERT_LOOP_VOCAB_PATH` (raw per-iteration collect vocab)
+- `DECKXPERT_LOOP_TRAIN_DATASET_PATH` (actual dataset used for training; replay-aware)
+- `DECKXPERT_LOOP_TRAIN_VOCAB_PATH` (actual vocab used for training)
 - `DECKXPERT_LOOP_BEST_CANDIDATE` (post-train)
+- `DECKXPERT_LOOP_BEST_MODEL_PATH` (post-train)
+- `DECKXPERT_LOOP_MODEL_PROMOTED` (`1`/`0`)
 
 Loop outputs are stored in:
 - `sim_harness/data/rl/loops/<run-id>/run.meta.json`
@@ -273,6 +301,10 @@ Loop outputs are stored in:
 - `sim_harness/data/rl/loops/<run-id>/iteration_###/train/policy_value.pt`
 - `sim_harness/data/rl/loops/<run-id>/iteration_###/eval/candidate_ranking.json`
 - `sim_harness/data/rl/loops/<run-id>/run_summary.json`
+
+Additional loop artifacts:
+- replay buffer JSONL (default `run_dir/replay_buffer.jsonl`),
+- promoted best checkpoint (`--best-model-path`) and adjacent meta JSON.
 
 ## Rule/Engine Notes
 

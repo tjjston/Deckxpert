@@ -7,6 +7,7 @@ import os
 import random
 import re
 import shlex
+import shutil
 import statistics
 import subprocess
 import uuid
@@ -950,6 +951,7 @@ def cmd_sim_create(args: argparse.Namespace) -> int:
             "mcts_max_depth": args.mcts_max_depth,
         },
         workers=args.workers,
+        progress_label=f"sim_create:{args.policy}",
     )
 
     grouped: dict[int, list[MatchResult]] = {}
@@ -1239,6 +1241,7 @@ def _collect_rl_rows_for_candidate(
             workers=workers,
             output_jsonl=output_jsonl,
             output_parquet=None,
+            progress_label=f"rl_collect:{candidate.deck_id}:{policy}",
         )
 
         rows = build_training_rows_from_results(results, source_policy=policy, hash_dim=hash_dim)
@@ -1315,6 +1318,114 @@ def _write_rl_dataset_bundle(
     }
 
 
+def _load_replay_rows(path: Path) -> list[dict[str, Any]]:
+    from .rl.dataset import load_dataset_rows
+
+    if not path.exists():
+        return []
+    return load_dataset_rows(path)
+
+
+def _update_replay_buffer(
+    *,
+    replay_path: Path,
+    new_rows: list[dict[str, Any]],
+    max_rows: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    from .rl.dataset import write_jsonl_rows
+
+    existing_rows = _load_replay_rows(replay_path)
+    before_count = len(existing_rows)
+    combined_rows = existing_rows + list(new_rows)
+    dropped_rows = 0
+    if max_rows > 0 and len(combined_rows) > max_rows:
+        dropped_rows = len(combined_rows) - max_rows
+        combined_rows = combined_rows[-max_rows:]
+    replay_path.parent.mkdir(parents=True, exist_ok=True)
+    write_jsonl_rows(replay_path, combined_rows)
+    _safe_daily_backup(refresh_today=True)
+    stats = {
+        "replay_path": str(replay_path),
+        "rows_before": int(before_count),
+        "rows_added": int(len(new_rows)),
+        "rows_dropped": int(dropped_rows),
+        "rows_after": int(len(combined_rows)),
+        "max_rows": int(max_rows),
+    }
+    return combined_rows, stats
+
+
+def _load_best_model_eval_win_rate(best_meta_path: Path) -> float:
+    if not best_meta_path.exists():
+        return float("-inf")
+    try:
+        payload = json.loads(best_meta_path.read_text(encoding="utf-8") or "{}")
+    except Exception:
+        return float("-inf")
+    try:
+        return float(payload.get("eval_win_rate", float("-inf")))
+    except Exception:
+        return float("-inf")
+
+
+def _promote_best_model(
+    *,
+    source_model_path: Path,
+    target_model_path: Path,
+    target_meta_path: Path,
+    eval_win_rate: float,
+    promotion_threshold: float,
+    previous_best_win_rate: float,
+    run_id: str,
+    iteration: int,
+    eval_policy: str,
+    eval_games: int,
+    top_eval_row: dict[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        "promoted": False,
+        "eval_win_rate": float(eval_win_rate),
+        "promotion_threshold": float(promotion_threshold),
+        "previous_best_win_rate": float(previous_best_win_rate) if previous_best_win_rate != float("-inf") else None,
+        "target_model_path": str(target_model_path),
+    }
+    if eval_win_rate < promotion_threshold:
+        payload["reason"] = "below_threshold"
+        return payload
+    if eval_win_rate <= previous_best_win_rate:
+        payload["reason"] = "not_better_than_best"
+        return payload
+    target_model_path.parent.mkdir(parents=True, exist_ok=True)
+    source_resolved = source_model_path.resolve()
+    target_resolved = target_model_path.resolve()
+    if source_resolved != target_resolved:
+        shutil.copy2(source_resolved, target_resolved)
+    else:
+        target_model_path.touch()
+    meta_payload = {
+        "updated_at": _now_iso(),
+        "run_id": run_id,
+        "iteration": int(iteration),
+        "source_model_path": str(source_model_path),
+        "best_model_path": str(target_model_path),
+        "eval_policy": str(eval_policy),
+        "eval_games_per_opponent": int(eval_games),
+        "eval_win_rate": float(eval_win_rate),
+        "promotion_threshold": float(promotion_threshold),
+        "top_eval_row": dict(top_eval_row),
+    }
+    target_meta_path.parent.mkdir(parents=True, exist_ok=True)
+    target_meta_path.write_text(json.dumps(meta_payload, indent=2) + "\n", encoding="utf-8")
+    payload.update(
+        {
+            "promoted": True,
+            "reason": "promoted",
+            "meta_path": str(target_meta_path),
+        }
+    )
+    return payload
+
+
 def _evaluate_candidate(
     *,
     candidate: DeckRecord,
@@ -1341,6 +1452,7 @@ def _evaluate_candidate(
         workers=workers,
         output_jsonl=None,
         output_parquet=None,
+        progress_label=f"rl_eval:{candidate.deck_id}:{policy}",
     )
     total_games = len(results)
     wins = sum(1 for r in results if int(r.winner) == 1)
@@ -1418,6 +1530,7 @@ def cmd_sim_shootout(args: argparse.Namespace) -> int:
                 "mcts_max_depth": args.mcts_max_depth if policy == "mcts" else 0,
             },
             workers=args.workers,
+            progress_label=f"sim_shootout:{policy}",
         )
         illegal_audit = _extract_illegal_event_rows(results, opponents, args.games)
         turns = [r.turns for r in results]
@@ -1602,10 +1715,20 @@ def cmd_rl_loop(args: argparse.Namespace) -> int:
     if args.eval_policy not in SUPPORTED_POLICIES:
         allowed = ", ".join(SUPPORTED_POLICIES)
         raise ValueError(f"Unsupported eval policy '{args.eval_policy}'. Allowed: {allowed}")
+    replay_max_rows = int(args.replay_max_rows)
+    if replay_max_rows < 0:
+        raise ValueError("replay_max_rows must be >= 0")
+    promotion_threshold = float(args.promotion_threshold)
+    if not (0.0 <= promotion_threshold <= 1.0):
+        raise ValueError("promotion_threshold must be in [0.0, 1.0]")
 
     run_id = str(args.run_id or datetime.now(timezone.utc).strftime("loop-%Y%m%d-%H%M%S"))
     run_dir = Path(args.run_dir) if args.run_dir else Path("sim_harness/data/rl/loops") / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    replay_path = Path(args.replay_path) if str(args.replay_path or "").strip() else (run_dir / "replay_buffer.jsonl")
+    best_model_path = Path(args.best_model_path) if str(args.best_model_path or "").strip() else (run_dir / "best" / "policy_value_best.pt")
+    best_model_meta_path = best_model_path.with_suffix(best_model_path.suffix + ".meta.json")
+    best_eval_win_rate = _load_best_model_eval_win_rate(best_model_meta_path)
 
     active_candidate_id = str(args.candidate)
     run_meta = {
@@ -1648,11 +1771,23 @@ def cmd_rl_loop(args: argparse.Namespace) -> int:
             "post_train_hook": str(args.post_train_hook or ""),
             "allow_hook_failures": bool(args.allow_hook_failures),
         },
+        "replay": {
+            "enabled": bool(replay_max_rows > 0),
+            "replay_path": str(replay_path),
+            "max_rows": int(replay_max_rows),
+        },
+        "promotion": {
+            "threshold": float(promotion_threshold),
+            "best_model_path": str(best_model_path),
+            "best_model_meta_path": str(best_model_meta_path),
+            "starting_best_eval_win_rate": None if best_eval_win_rate == float("-inf") else float(best_eval_win_rate),
+        },
         "advance_candidate_on_eval": bool(args.advance_candidate_on_eval),
     }
     (run_dir / "run.meta.json").write_text(json.dumps(run_meta, indent=2) + "\n", encoding="utf-8")
 
     iteration_reports: list[dict[str, Any]] = []
+    promoted_iterations: list[int] = []
     for iteration in range(1, int(args.iterations) + 1):
         iteration_seed = int(args.seed) + ((iteration - 1) * int(args.seed_step))
         iter_dir = run_dir / f"iteration_{iteration:03d}"
@@ -1738,11 +1873,33 @@ def cmd_rl_loop(args: argparse.Namespace) -> int:
             "[loop] dataset rows="
             f"{bundle['total_rows']} vocab={bundle['action_vocab_size']} path={bundle['dataset_path']}"
         )
+        replay_stats: dict[str, Any] | None = None
+        training_bundle = bundle
+        if replay_max_rows > 0:
+            replay_rows, replay_stats = _update_replay_buffer(
+                replay_path=replay_path,
+                new_rows=all_rows,
+                max_rows=replay_max_rows,
+            )
+            replay_prefix = collect_dir / "training_data_replay"
+            replay_meta = {
+                "created_at": _now_iso(),
+                "iteration": iteration,
+                "run_id": run_id,
+                "source_dataset_path": str(bundle["dataset_path"]),
+                "source_total_rows": int(bundle["total_rows"]),
+                "replay": replay_stats,
+            }
+            training_bundle = _write_rl_dataset_bundle(rows=replay_rows, output_prefix=replay_prefix, meta=replay_meta)
+            print(
+                "[loop] replay rows="
+                f"{training_bundle['total_rows']} path={training_bundle['dataset_path']}"
+            )
 
         model_path = train_dir / "policy_value.pt"
         train_summary = train_policy_value_model(
-            dataset_path=bundle["dataset_path"],
-            vocab_path=bundle["vocab_path"],
+            dataset_path=training_bundle["dataset_path"],
+            vocab_path=training_bundle["vocab_path"],
             model_out=str(model_path),
             epochs=args.epochs,
             batch_size=args.batch_size,
@@ -1797,6 +1954,43 @@ def cmd_rl_loop(args: argparse.Namespace) -> int:
         eval_report_path.write_text(json.dumps(eval_payload, indent=2) + "\n", encoding="utf-8")
 
         best_candidate_id = eval_ranked[0]["candidate_deck_id"] if eval_ranked else active_candidate_id
+        top_eval_row = eval_ranked[0] if eval_ranked else {}
+        top_eval_win_rate = float(top_eval_row.get("win_rate", 0.0)) if top_eval_row else 0.0
+        if eval_ranked:
+            promotion = _promote_best_model(
+                source_model_path=Path(str(train_summary.get("model_path", str(model_path)))),
+                target_model_path=best_model_path,
+                target_meta_path=best_model_meta_path,
+                eval_win_rate=top_eval_win_rate,
+                promotion_threshold=promotion_threshold,
+                previous_best_win_rate=best_eval_win_rate,
+                run_id=run_id,
+                iteration=iteration,
+                eval_policy=str(args.eval_policy),
+                eval_games=int(args.eval_games),
+                top_eval_row=top_eval_row,
+            )
+        else:
+            promotion = {
+                "promoted": False,
+                "reason": "no_eval_rows",
+                "eval_win_rate": 0.0,
+                "promotion_threshold": float(promotion_threshold),
+                "previous_best_win_rate": None if best_eval_win_rate == float("-inf") else float(best_eval_win_rate),
+                "target_model_path": str(best_model_path),
+            }
+        if bool(promotion.get("promoted")):
+            best_eval_win_rate = float(top_eval_win_rate)
+            promoted_iterations.append(iteration)
+            print(
+                "[loop] promoted model "
+                f"iteration={iteration} win_rate={top_eval_win_rate:.4f} path={best_model_path}"
+            )
+        else:
+            print(
+                "[loop] kept current best model "
+                f"(reason={promotion.get('reason', 'n/a')}, win_rate={top_eval_win_rate:.4f}, threshold={promotion_threshold:.4f})"
+            )
         if bool(args.advance_candidate_on_eval):
             active_candidate_id = str(best_candidate_id)
             print(f"[loop] next active candidate set to {active_candidate_id}")
@@ -1813,8 +2007,12 @@ def cmd_rl_loop(args: argparse.Namespace) -> int:
                 "DECKXPERT_LOOP_MODEL_PATH": str(train_summary.get("model_path", str(model_path))),
                 "DECKXPERT_LOOP_DATASET_PATH": str(bundle["dataset_path"]),
                 "DECKXPERT_LOOP_VOCAB_PATH": str(bundle["vocab_path"]),
+                "DECKXPERT_LOOP_TRAIN_DATASET_PATH": str(training_bundle["dataset_path"]),
+                "DECKXPERT_LOOP_TRAIN_VOCAB_PATH": str(training_bundle["vocab_path"]),
                 "DECKXPERT_LOOP_BEST_CANDIDATE": str(best_candidate_id),
                 "DECKXPERT_LOOP_EVAL_REPORT": str(eval_report_path),
+                "DECKXPERT_LOOP_BEST_MODEL_PATH": str(best_model_path),
+                "DECKXPERT_LOOP_MODEL_PROMOTED": "1" if bool(promotion.get("promoted")) else "0",
             },
         )
 
@@ -1824,6 +2022,8 @@ def cmd_rl_loop(args: argparse.Namespace) -> int:
             "active_candidate_start": candidate_ids[0] if candidate_ids else active_candidate_id,
             "candidate_ids": candidate_ids,
             "collect": bundle,
+            "training_data": training_bundle,
+            "replay": replay_stats if replay_stats is not None else {"enabled": False},
             "train": train_summary,
             "evaluation": {
                 "policy": args.eval_policy,
@@ -1831,7 +2031,9 @@ def cmd_rl_loop(args: argparse.Namespace) -> int:
                 "best_candidate_deck_id": best_candidate_id,
                 "ranking_path": str(eval_report_path),
                 "ranked": eval_ranked,
+                "top_eval_win_rate": float(top_eval_win_rate),
             },
+            "promotion": promotion,
             "hooks": {
                 "deck_generator": pre_hook,
                 "post_train": post_hook,
@@ -1850,6 +2052,12 @@ def cmd_rl_loop(args: argparse.Namespace) -> int:
         "iterations_completed": len(iteration_reports),
         "run_dir": str(run_dir),
         "final_active_candidate": active_candidate_id,
+        "replay_path": str(replay_path) if replay_max_rows > 0 else "",
+        "replay_max_rows": int(replay_max_rows),
+        "best_model_path": str(best_model_path),
+        "best_model_meta_path": str(best_model_meta_path),
+        "best_eval_win_rate": None if best_eval_win_rate == float("-inf") else float(best_eval_win_rate),
+        "promoted_iterations": promoted_iterations,
         "iteration_reports": [str(run_dir / f"iteration_{i:03d}" / "iteration_report.json") for i in range(1, len(iteration_reports) + 1)],
     }
     summary_path = run_dir / "run_summary.json"
@@ -2011,7 +2219,7 @@ def build_parser() -> argparse.ArgumentParser:
     rl_loop.add_argument("--min-cards", type=int, choices=sorted(SUPPORTED_MIN_DECK_SIZES), default=DEFAULT_MIN_DECK_SIZE)
     rl_loop.add_argument(
         "--policies",
-        default="heuristic,mcts",
+        default="random_legal,heuristic,mcts",
         help="Comma-separated policy list for dataset collection",
     )
     rl_loop.add_argument("--mcts-iterations", type=int, default=16)
@@ -2022,6 +2230,28 @@ def build_parser() -> argparse.ArgumentParser:
     rl_loop.add_argument("--hash-dim", type=int, default=256)
     rl_loop.add_argument("--run-id", default=None, help="Optional loop run id")
     rl_loop.add_argument("--run-dir", default=None, help="Optional loop output directory")
+    rl_loop.add_argument(
+        "--replay-max-rows",
+        type=int,
+        default=500000,
+        help="Max rows to keep in replay buffer; set 0 to disable replay",
+    )
+    rl_loop.add_argument(
+        "--replay-path",
+        default=None,
+        help="Optional replay buffer jsonl path (defaults to run_dir/replay_buffer.jsonl)",
+    )
+    rl_loop.add_argument(
+        "--promotion-threshold",
+        type=float,
+        default=0.55,
+        help="Promote model when top eval win rate is >= this threshold",
+    )
+    rl_loop.add_argument(
+        "--best-model-path",
+        default="sim_harness/data/rl/policy_value_best.pt",
+        help="Best-model checkpoint destination updated on promotion",
+    )
     rl_loop.add_argument("--deck-generator-cmd", default=None, help="Optional command run at each iteration start")
     rl_loop.add_argument("--post-train-hook", default=None, help="Optional command run after each model train")
     rl_loop.add_argument(

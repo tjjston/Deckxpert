@@ -1,0 +1,14 @@
+{
+    "created_at_ms": 1773200438547,
+    "source": "sim_harness",
+    "deck_a_id": "mechanics_probe",
+    "deck_b_id": "975c4ccb3e4f",
+    "deck_a_name": "Mechanics Probe (Keywords + Force + Leader)",
+    "deck_b_name": "Vader Starter, Improved with C/U",
+    "policy": "heuristic",
+    "seed": 123,
+    "max_actions": 120,
+    "winner": 0,
+    "turns": 8,
+    "illegal_actions": 0
+}
