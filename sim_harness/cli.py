@@ -25,9 +25,18 @@ DECKS_FILE = DATA_DIR / "decks.json"
 SIMS_FILE = DATA_DIR / "simulations.json"
 SHOOTOUT_HISTORY_FILE = DATA_DIR / "shootout_history.jsonl"
 GENERATED_CARD_DICT_FILE = Path("GeneratedCode") / "GeneratedCardDictionaries.php"
+CARD_OVERRIDES_FILE = Path("CardOverrides.php")
 SUPPORTED_MIN_DECK_SIZES = {30, 50}
 DEFAULT_MIN_DECK_SIZE = 50
 SUPPORTED_POLICIES = ("random_legal", "random_non_pass", "first_non_pass", "heuristic", "mcts")
+SET_ID_RE = re.compile(r"^[A-Z0-9]+_[0-9]{3}$")
+DECK_POOLS = ("candidate", "meta", "starter", "random", "training")
+DECK_POOL_SET = set(DECK_POOLS)
+STORE_CANDIDATE_POOLS = {"candidate", "training"}
+OPPONENT_POOL_SET = {"meta", "starter", "training"}
+OPPONENT_SET_CHOICES = ("meta", "starter", "training", "all", "random")
+PREFERRED_SET_PREFIXES = ("SOR", "SHD", "TWI", "JTL", "LOF", "SEC", "IBH", "C24")
+PREFERRED_SET_PREFIX_RANK = {prefix: idx for idx, prefix in enumerate(PREFERRED_SET_PREFIXES)}
 
 
 @dataclass
@@ -150,6 +159,154 @@ def _known_set_id_to_card_type() -> dict[str, str]:
     return set_to_type
 
 
+@lru_cache(maxsize=1)
+def _card_id_override_map() -> dict[str, str]:
+    """
+    Parse CardOverrides.php `CardIDOverride` mappings as set-id aliases.
+    """
+    if not CARD_OVERRIDES_FILE.exists():
+        return {}
+    text = CARD_OVERRIDES_FILE.read_text(encoding="utf-8", errors="ignore")
+    mapping: dict[str, str] = {}
+    pending: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line == "":
+            continue
+        for match in re.finditer(r'case\s+"([A-Z0-9_]+)"\s*:', line):
+            pending.append(match.group(1))
+        ret_match = re.search(r'return\s+"([A-Z0-9_]+)"\s*;', line)
+        if ret_match:
+            target = ret_match.group(1).strip()
+            if target != "":
+                for source in pending:
+                    mapping[source] = target
+            pending = []
+        elif "default:" in line:
+            pending = []
+    return mapping
+
+
+@lru_cache(maxsize=1)
+def _known_set_id_to_title() -> dict[str, str]:
+    """
+    Best-effort mapping of set-id card codes (e.g. SOR_001) to card title.
+    """
+    if not GENERATED_CARD_DICT_FILE.exists():
+        return {}
+
+    text = GENERATED_CARD_DICT_FILE.read_text(encoding="utf-8", errors="ignore")
+
+    uuid_start = text.find("function UUIDLookup(")
+    uuid_end = text.find("function CardIDLookup(")
+    title_start = text.find("function CardTitle(")
+    title_end = text.find("function CardSubtitle(")
+    if min(uuid_start, uuid_end, title_start, title_end) < 0:
+        return {}
+
+    uuid_block = text[uuid_start:uuid_end]
+    title_block = text[title_start:title_end]
+
+    uuid_by_set = {
+        m.group(1): m.group(2).lower()
+        for m in re.finditer(r"'([A-Z0-9]+_[0-9]{3})'\s*=>\s*'([0-9a-fA-F]+)'", uuid_block)
+    }
+    title_by_uuid = {
+        m.group(1).strip("'").lower(): m.group(2).replace("\\'", "'").strip()
+        for m in re.finditer(
+            r"([0-9]+|'[0-9a-fA-F]+')\s*=>\s*'((?:\\'|[^'])*)'",
+            title_block,
+        )
+    }
+
+    set_to_title: dict[str, str] = {}
+    for set_id, uuid_id in uuid_by_set.items():
+        title = title_by_uuid.get(uuid_id, "")
+        if title:
+            set_to_title[set_id] = title
+    return set_to_title
+
+
+@lru_cache(maxsize=1)
+def _known_title_to_set_ids() -> dict[str, list[str]]:
+    title_to_set_ids: dict[str, list[str]] = {}
+    for set_id, title in _known_set_id_to_title().items():
+        title_to_set_ids.setdefault(title, []).append(set_id)
+    return title_to_set_ids
+
+
+def _set_id_sort_key(card_id: str) -> tuple[int, int, str]:
+    prefix, _, number = str(card_id).partition("_")
+    try:
+        suffix = int(number)
+    except (TypeError, ValueError):
+        suffix = 10**9
+    return (PREFERRED_SET_PREFIX_RANK.get(prefix, 10**6), suffix, str(card_id))
+
+
+def _canonicalize_unmapped_variant_id(card_id: str) -> str:
+    """
+    Resolve unmapped promo/variant set IDs by matching title+type to a preferred
+    non-promo set prefix.
+    """
+    current = str(card_id or "").strip()
+    if current == "" or not SET_ID_RE.fullmatch(current):
+        return current
+
+    prefix = current.split("_", 1)[0]
+    if prefix in PREFERRED_SET_PREFIX_RANK:
+        return current
+
+    title = _known_set_id_to_title().get(current, "")
+    if title == "":
+        return current
+
+    candidates = _known_title_to_set_ids().get(title, [])
+    if len(candidates) <= 1:
+        return current
+
+    set_to_type = _known_set_id_to_card_type()
+    current_type = set_to_type.get(current, "")
+
+    preferred: list[str] = []
+    for candidate in candidates:
+        if candidate == current:
+            continue
+        candidate_prefix = candidate.split("_", 1)[0]
+        if candidate_prefix not in PREFERRED_SET_PREFIX_RANK:
+            continue
+        candidate_type = set_to_type.get(candidate, "")
+        if current_type and candidate_type and candidate_type != current_type:
+            continue
+        preferred.append(candidate)
+
+    if not preferred:
+        return current
+    preferred.sort(key=_set_id_sort_key)
+    return preferred[0]
+
+
+def _canonicalize_set_id(card_id: str, max_hops: int = 4) -> str:
+    current = str(card_id or "").strip()
+    if current == "":
+        return current
+    overrides = _card_id_override_map()
+    visited: set[str] = set()
+    hops = max(1, int(max_hops))
+    for _ in range(hops):
+        target = str(overrides.get(current, "")).strip()
+        if target == "" or target == current:
+            break
+        if target in visited:
+            break
+        # Ignore malformed override targets (example: "LOF_"), keep current.
+        if not SET_ID_RE.fullmatch(target):
+            break
+        visited.add(current)
+        current = target
+    return _canonicalize_unmapped_variant_id(current)
+
+
 def _random_hex(rng: random.Random, length: int = 8) -> str:
     alphabet = "0123456789abcdef"
     return "".join(rng.choice(alphabet) for _ in range(max(1, int(length))))
@@ -205,8 +362,9 @@ def _create_random_decks(
     author: str,
     max_copies: int,
 ) -> list[DeckRecord]:
-    if pool not in {"candidate", "meta", "starter"}:
-        raise ValueError("pool must be candidate/meta/starter")
+    if pool not in DECK_POOL_SET:
+        allowed = "/".join(DECK_POOLS)
+        raise ValueError(f"pool must be {allowed}")
     main_size = _coerce_min_cards(main_size)
     count = int(count)
     if count < 1:
@@ -219,11 +377,28 @@ def _create_random_decks(
         raise ValueError("max_copies must be >= 1")
 
     set_to_type = _known_set_id_to_card_type()
-    leader_ids = sorted([set_id for set_id, typ in set_to_type.items() if typ == "Leader"])
-    base_ids = sorted([set_id for set_id, typ in set_to_type.items() if typ == "Base"])
-    main_card_ids = sorted(
-        [set_id for set_id, typ in set_to_type.items() if typ in {"Unit", "Event", "Upgrade"}]
-    )
+    by_type: dict[str, set[str]] = {
+        "Leader": set(),
+        "Base": set(),
+        "Unit": set(),
+        "Event": set(),
+        "Upgrade": set(),
+    }
+    for set_id, card_type in set_to_type.items():
+        normalized_type = str(card_type).strip()
+        if normalized_type not in by_type:
+            continue
+        canonical_id = _canonicalize_set_id(str(set_id))
+        if canonical_id == "" or not SET_ID_RE.fullmatch(canonical_id):
+            continue
+        # Keep only canonical ids that still exist in generated dictionaries.
+        if canonical_id not in set_to_type:
+            continue
+        by_type[normalized_type].add(canonical_id)
+
+    leader_ids = sorted(by_type["Leader"])
+    base_ids = sorted(by_type["Base"])
+    main_card_ids = sorted(by_type["Unit"] | by_type["Event"] | by_type["Upgrade"])
     if not leader_ids:
         raise ValueError("No leader cards found in generated dictionaries.")
     if not base_ids:
@@ -326,6 +501,44 @@ def _remove_one_copy(swudb: dict[str, Any], set_id: str) -> bool:
     return False
 
 
+def _apply_set_id_overrides(swudb: dict[str, Any]) -> list[str]:
+    normalized_pairs: list[tuple[str, str]] = []
+
+    def normalize_card_obj(card_obj: dict[str, Any]) -> None:
+        raw_id = str(card_obj.get("id", "")).strip()
+        if raw_id == "":
+            return
+        canonical_id = _canonicalize_set_id(raw_id)
+        if canonical_id == "" or canonical_id == raw_id:
+            return
+        card_obj["id"] = canonical_id
+        normalized_pairs.append((raw_id, canonical_id))
+
+    leader = swudb.get("leader")
+    if isinstance(leader, dict):
+        normalize_card_obj(leader)
+    base = swudb.get("base")
+    if isinstance(base, dict):
+        normalize_card_obj(base)
+
+    for zone in ("deck", "sideboard"):
+        cards = swudb.get(zone, [])
+        if not isinstance(cards, list):
+            continue
+        for card in cards:
+            if isinstance(card, dict):
+                normalize_card_obj(card)
+
+    if not normalized_pairs:
+        return []
+    unique_pairs = sorted(set(normalized_pairs))
+    sample = ", ".join(f"{src}->{dst}" for src, dst in unique_pairs[:5])
+    more = len(unique_pairs) - 5
+    if more > 0:
+        sample += f" (+{more} more)"
+    return [f"Normalized card IDs: {sample}"]
+
+
 def _normalize_swudb_deck(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     """
     Normalizes accepted SWUDB payload variants before validation.
@@ -338,6 +551,7 @@ def _normalize_swudb_deck(payload: dict[str, Any]) -> tuple[dict[str, Any], list
 
     swudb: dict[str, Any] = copy.deepcopy(payload)
     warnings: list[str] = []
+    warnings.extend(_apply_set_id_overrides(swudb))
 
     base = swudb.get("base")
     if isinstance(base, dict):
@@ -433,13 +647,17 @@ def _cards_to_expanded_ids(swudb: dict[str, Any]) -> tuple[list[str], list[str]]
 
     # Engine expects base at character index 0 and leader at CharacterPieces() offset.
     if isinstance(base, dict) and base.get("id"):
-        material.extend([str(base["id"])] * int(base.get("count", 1)))
+        base_id = _canonicalize_set_id(str(base.get("id", "")))
+        if base_id:
+            material.extend([base_id] * int(base.get("count", 1)))
     if isinstance(leader, dict) and leader.get("id"):
-        material.extend([str(leader["id"])] * int(leader.get("count", 1)))
+        leader_id = _canonicalize_set_id(str(leader.get("id", "")))
+        if leader_id:
+            material.extend([leader_id] * int(leader.get("count", 1)))
 
     main: list[str] = []
     for card in swudb.get("deck", []):
-        cid = str(card.get("id", "")).strip()
+        cid = _canonicalize_set_id(str(card.get("id", "")).strip())
         if not cid:
             continue
         count = int(card.get("count", 0))
@@ -507,11 +725,45 @@ def _is_random_deck(deck: DeckRecord) -> bool:
 
 
 def _delete_deck(deck_id: str) -> DeckRecord:
+    return _delete_decks(deck_ids=[deck_id])[0]
+
+
+def _delete_decks(
+    *,
+    deck_ids: list[str] | None = None,
+    pool: str | None = None,
+) -> list[DeckRecord]:
+    ids: list[str] = []
+    if deck_ids is not None:
+        ids = [str(v).strip() for v in deck_ids if str(v).strip() != ""]
+    id_set = set(ids)
+    if not id_set and pool is None:
+        raise ValueError("Provide deck_ids and/or pool for bulk delete.")
+    if pool is not None and pool not in DECK_POOL_SET:
+        allowed = "/".join(DECK_POOLS)
+        raise ValueError(f"pool must be {allowed}")
+
     decks = _load_decks()
-    target = _find_deck(decks, deck_id)
-    remaining = [d for d in decks if d.deck_id != deck_id]
-    _save_decks(remaining)
-    return target
+    removed: list[DeckRecord] = []
+    kept: list[DeckRecord] = []
+    for deck in decks:
+        by_id = bool(id_set) and deck.deck_id in id_set
+        by_pool = pool is not None and deck.pool == pool
+        if by_id or by_pool:
+            removed.append(deck)
+        else:
+            kept.append(deck)
+
+    if id_set:
+        removed_ids = {d.deck_id for d in removed}
+        missing = sorted(id_set - removed_ids)
+        if missing:
+            raise ValueError(f"Deck not found: {', '.join(missing)}")
+    if not removed:
+        raise ValueError("No decks matched bulk delete request.")
+
+    _save_decks(kept)
+    return removed
 
 
 def _update_deck(deck_id: str, *, swudb: dict[str, Any] | None = None, pool: str | None = None) -> DeckRecord:
@@ -523,6 +775,9 @@ def _update_deck(deck_id: str, *, swudb: dict[str, Any] | None = None, pool: str
         if swudb is not None:
             deck.swudb = swudb
         if pool is not None:
+            if pool not in DECK_POOL_SET:
+                allowed = "/".join(DECK_POOLS)
+                raise ValueError(f"pool must be {allowed}")
             deck.pool = pool
         updated = deck
         break
@@ -1147,7 +1402,7 @@ def _resolve_loop_candidate_ids(
 
     if include_store_pool:
         for deck in _load_decks():
-            if deck.pool == "candidate":
+            if deck.pool in STORE_CANDIDATE_POOLS:
                 add_candidate(deck.deck_id)
 
     if not candidate_ids:
@@ -1481,12 +1736,12 @@ def _resolve_candidate_and_opponents(
     _assert_min_deck_size(candidate.swudb, min_cards, f"Candidate deck '{candidate.deck_id}'")
 
     if opponent_set == "all":
-        opponents = [d for d in decks if d.deck_id != candidate.deck_id and d.pool in {"meta", "starter"}]
+        opponents = [d for d in decks if d.deck_id != candidate.deck_id and d.pool in OPPONENT_POOL_SET]
     elif opponent_set == "random":
         if not _is_random_deck(candidate):
             raise ValueError(
                 "Candidate must be a random deck when opponents=random. "
-                "Generate one with deck random --pool candidate."
+                "Generate one with deck random --pool random (or candidate/training)."
             )
         opponents = [d for d in decks if d.deck_id != candidate.deck_id and _is_random_deck(d)]
     else:
@@ -1495,9 +1750,9 @@ def _resolve_candidate_and_opponents(
     if not opponents:
         if opponent_set == "random":
             raise ValueError(
-                "No random opponent decks found. Generate random decks for meta/starter or candidate pools first."
+                "No random opponent decks found. Generate random decks in random/candidate/training pools first."
             )
-        raise ValueError("No opponent decks found for selected set. Upload decks to meta/starter pools first.")
+        raise ValueError("No opponent decks found for selected set. Upload decks to meta/starter/training pools first.")
     invalid_opponents = [d for d in opponents if _deck_main_count(d.swudb) < min_cards]
     if invalid_opponents:
         sample = ", ".join(f"{d.deck_id}({_deck_main_count(d.swudb)})" for d in invalid_opponents[:8])
@@ -2081,13 +2336,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     deck_upload = deck_sub.add_parser("upload", help="Upload SWUDB deck JSON")
     deck_upload.add_argument("--file", required=True, help="Path to SWUDB deck JSON")
-    deck_upload.add_argument("--pool", choices=["meta", "starter", "candidate"], required=True)
+    deck_upload.add_argument("--pool", choices=list(DECK_POOLS), required=True)
     deck_upload.add_argument("--deck-id", help="Optional custom deck id")
     deck_upload.set_defaults(func=cmd_deck_upload)
 
     deck_random = deck_sub.add_parser("random", help="Generate random decks (1 leader + 1 base + 30/50 main cards)")
     deck_random.add_argument("--count", type=int, default=1, help="How many random decks to generate")
-    deck_random.add_argument("--pool", choices=["candidate", "meta", "starter"], default="candidate")
+    deck_random.add_argument("--pool", choices=list(DECK_POOLS), default="random")
     deck_random.add_argument("--main-size", type=int, choices=sorted(SUPPORTED_MIN_DECK_SIZES), default=DEFAULT_MIN_DECK_SIZE)
     deck_random.add_argument("--seed", type=int, default=None, help="Optional RNG seed for reproducibility")
     deck_random.add_argument("--deck-id", default=None, help="Explicit deck id (only when --count 1)")
@@ -2098,7 +2353,7 @@ def build_parser() -> argparse.ArgumentParser:
     deck_random.set_defaults(func=cmd_deck_random)
 
     deck_list = deck_sub.add_parser("list", help="List decks")
-    deck_list.add_argument("--pool", choices=["all", "meta", "starter", "candidate"], default="all")
+    deck_list.add_argument("--pool", choices=["all", *DECK_POOLS], default="all")
     deck_list.set_defaults(func=cmd_deck_list)
 
     deck_show = deck_sub.add_parser("show", help="Show one deck")
@@ -2115,7 +2370,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sim_create = sim_sub.add_parser("create", help="Create a simulation for one candidate deck")
     sim_create.add_argument("--candidate", required=True, help="Candidate deck id")
-    sim_create.add_argument("--opponents", choices=["meta", "starter", "all", "random"], default="all")
+    sim_create.add_argument("--opponents", choices=list(OPPONENT_SET_CHOICES), default="all")
     sim_create.add_argument("--games", type=int, default=20, help="Games per opponent")
     sim_create.add_argument("--seed", type=int, default=42)
     sim_create.add_argument("--workers", type=int, default=4)
@@ -2145,7 +2400,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sim_shootout = sim_sub.add_parser("shootout", help="Compare multiple policies on the same matchup/seed set")
     sim_shootout.add_argument("--candidate", required=True, help="Candidate deck id")
-    sim_shootout.add_argument("--opponents", choices=["meta", "starter", "all", "random"], default="all")
+    sim_shootout.add_argument("--opponents", choices=list(OPPONENT_SET_CHOICES), default="all")
     sim_shootout.add_argument("--games", type=int, default=20, help="Games per opponent")
     sim_shootout.add_argument("--seed", type=int, default=42)
     sim_shootout.add_argument("--workers", type=int, default=4)
@@ -2166,7 +2421,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     rl_collect = rl_sub.add_parser("collect", help="Collect supervised policy/value dataset from simulated games")
     rl_collect.add_argument("--candidate", required=True, help="Candidate deck id")
-    rl_collect.add_argument("--opponents", choices=["meta", "starter", "all", "random"], default="all")
+    rl_collect.add_argument("--opponents", choices=list(OPPONENT_SET_CHOICES), default="all")
     rl_collect.add_argument("--games", type=int, default=20, help="Games per opponent")
     rl_collect.add_argument("--seed", type=int, default=42)
     rl_collect.add_argument("--workers", type=int, default=4)
@@ -2208,7 +2463,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include all decks from pool=candidate in each loop iteration",
     )
-    rl_loop.add_argument("--opponents", choices=["meta", "starter", "all", "random"], default="all")
+    rl_loop.add_argument("--opponents", choices=list(OPPONENT_SET_CHOICES), default="all")
     rl_loop.add_argument("--iterations", type=int, default=3)
     rl_loop.add_argument("--games", type=int, default=20, help="Self-play games per opponent during collection")
     rl_loop.add_argument("--eval-games", type=int, default=20, help="Evaluation games per opponent")

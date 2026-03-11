@@ -90,7 +90,7 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 <div class=\"topTiles\">
 <div class=\"card\" data-tab=\"deck\"><h3>Add Deck</h3>
 <label>Deck ID (optional)</label><input id=\"deckId\" placeholder=\"my-candidate-v1\"/>
-<label>Pool</label><select id=\"pool\"><option>candidate</option><option>meta</option><option>starter</option></select>
+<label>Pool</label><select id=\"pool\"><option>candidate</option><option>training</option><option>random</option><option>meta</option><option>starter</option></select>
 <label>SWUDB JSON</label><textarea id=\"deckJson\" placeholder='{"metadata":{"name":"..."},...}'></textarea>
 <button id=\"uploadDeckBtn\" onclick=\"uploadDeck()\">Upload Deck</button>
 <button id=\"saveDeckEditBtn\" style=\"display:none;background:#0f766e;border-color:#0f766e\" onclick=\"saveDeckEdit()\">Save Deck Edit</button>
@@ -114,7 +114,7 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 
 <div class=\"card\" data-tab=\"sim\"><h3>Create Simulation</h3>
 <label>Candidate Deck</label><select id=\"candidate\"></select>
-<label>Opponent Set</label><select id=\"opponents\"><option>all</option><option>meta</option><option>starter</option><option>random</option></select>
+<label>Opponent Set</label><select id=\"opponents\"><option>all</option><option>meta</option><option>starter</option><option>training</option><option>random</option></select>
 <label>Deck Minimum</label><select id=\"simMinCards\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
 <label>Policy</label><select id=\"simPolicy\"><option value=\"random_legal\">Random legal (uniform)</option><option value=\"random_non_pass\">Random legal (prefer non-pass)</option><option value=\"first_non_pass\">First non-pass (legacy)</option><option value=\"heuristic\">Heuristic (rule-based)</option><option value=\"mcts\">MCTS starter</option></select>
 <label>MCTS Iterations</label><input id=\"simMctsIterations\" type=\"number\" value=\"16\"/>
@@ -167,7 +167,7 @@ SWU-specific early strategy:<br/>
 <div class=\"card\"><h3>Simulation Job</h3>
 <label>Candidate Deck</label><select id=\"mlSimCandidate\"></select>
 <label>Mode</label><select id=\"mlSimKind\"><option value=\"sim_create\">sim create</option><option value=\"sim_shootout\">sim shootout</option></select>
-<label>Opponents</label><select id=\"mlSimOpponents\"><option>all</option><option>meta</option><option>starter</option><option>random</option></select>
+<label>Opponents</label><select id=\"mlSimOpponents\"><option>all</option><option>meta</option><option>starter</option><option>training</option><option>random</option></select>
 <label>Deck Minimum</label><select id=\"mlSimMinCards\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
 <label>Policy (sim create)</label><select id=\"mlSimPolicy\"><option value=\"random_legal\">random_legal</option><option value=\"random_non_pass\">random_non_pass</option><option value=\"first_non_pass\">first_non_pass</option><option value=\"heuristic\">heuristic</option><option value=\"mcts\">mcts</option></select>
 <label>Policies (sim shootout, csv)</label><input id=\"mlSimPolicies\" value=\"random_legal,heuristic,mcts\"/>
@@ -184,7 +184,7 @@ SWU-specific early strategy:<br/>
 </div>
 <div class=\"card\"><h3>RL Collect Job</h3>
 <label>Candidate Deck</label><select id=\"mlCollectCandidate\"></select>
-<label>Opponents</label><select id=\"mlCollectOpponents\"><option>all</option><option>meta</option><option>starter</option><option>random</option></select>
+<label>Opponents</label><select id=\"mlCollectOpponents\"><option>all</option><option>meta</option><option>starter</option><option>training</option><option>random</option></select>
 <label>Deck Minimum</label><select id=\"mlCollectMinCards\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
 <label>Policies (csv)</label><input id=\"mlCollectPolicies\" value=\"heuristic,mcts\"/>
 <label>MCTS Iterations</label><input id=\"mlCollectMctsIterations\" type=\"number\" value=\"24\"/>
@@ -232,7 +232,19 @@ SWU-specific early strategy:<br/>
 <table><thead><tr><th>When</th><th>Candidate</th><th>Opponents</th><th>Best Policy</th><th>Best Win Rate</th><th>Games/Opp</th></tr></thead><tbody id=\"mlTrendRunsTbody\"></tbody></table>
 </div>
 <div class=\"grid\" data-tab-container=\"grid\">
-<div class=\"card\" data-tab=\"deck\"><h3>Decks</h3><table><thead><tr><th>ID</th><th>Pool</th><th>Name</th><th>Cards</th><th></th></tr></thead><tbody id=\"decksTbody\"></tbody></table></div>
+<div class=\"card\" data-tab=\"deck\"><h3>Decks</h3>
+<div class=\"replayControls\" style=\"margin-bottom:8px;\">
+<button style=\"width:auto\" onclick=\"toggleAllDeckChecks(true)\">Select All</button>
+<button style=\"width:auto\" onclick=\"toggleAllDeckChecks(false)\">Clear</button>
+<button style=\"width:auto;background:#b91c1c;border-color:#b91c1c\" onclick=\"bulkDeleteSelectedDecks()\">Delete Selected</button>
+<label style=\"margin:0 4px 0 10px;\">Pool</label>
+<select id=\"bulkDeletePool\" style=\"width:170px;margin:0;\">
+<option value=\"\">(select pool)</option>
+<option>candidate</option><option>training</option><option>random</option><option>meta</option><option>starter</option>
+</select>
+<button style=\"width:auto;background:#7f1d1d;border-color:#7f1d1d\" onclick=\"bulkDeletePoolDecks()\">Delete Pool</button>
+</div>
+<table><thead><tr><th><input id=\"deckCheckAll\" type=\"checkbox\" style=\"width:auto;margin:0\" onchange=\"toggleAllDeckChecks(this.checked)\"/></th><th>ID</th><th>Pool</th><th>Name</th><th>Cards</th><th></th></tr></thead><tbody id=\"decksTbody\"></tbody></table></div>
 <div class=\"card\" data-tab=\"sim\"><h3>Simulations</h3><table><thead><tr><th>ID</th><th>Candidate</th><th>Winrate</th><th>Games</th><th>Illegal</th><th></th></tr></thead><tbody id=\"simsTbody\"></tbody></table></div>
 </div>
 <div class=\"card\" data-tab=\"sim\"><h3>Simulation Analysis</h3><pre id=\"analysis\">Select a simulation to inspect analysis.</pre></div>
@@ -273,6 +285,7 @@ const SUMMARY_COLLAPSE_KEY = 'deckxpert_match_summary_collapsed';
 const MATCH_PREFS_KEY = 'deckxpert_single_match_prefs';
 const DASHBOARD_TAB_KEY = 'deckxpert_dashboard_active_tab';
 const ARENA_REPLAY_BASE_KEY = 'deckxpert_arena_replay_base_url';
+const CANDIDATE_POOL_SET = new Set(['candidate','training','random']);
 let currentMatchEvents = [];
 let roundNumbers = [];
 let currentRoundPage = 0;
@@ -428,7 +441,7 @@ function fillCandidateSelect(id,decks){
   const el=document.getElementById(id);
   if(!el) return;
   const prev=el.value||'';
-  fill(el,decks,d=>d.pool==='candidate');
+  fill(el,decks,d=>CANDIDATE_POOL_SET.has(String(d.pool||'')));
   if(!setSelectValueIfPresent(el,prev) && el.options.length>0) el.selectedIndex=0;
 }
 function renderCandidates(decks){
@@ -464,7 +477,24 @@ function setDeckEditMode(deckId=''){
   if(cancelBtn) cancelBtn.style.display=editingDeckId===''?'none':'';
   if(deckIdInput) deckIdInput.disabled=editingDeckId!=='';
 }
-function renderDecks(decks){const tb=document.getElementById('decksTbody');tb.innerHTML='';decks.forEach(d=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${d.deck_id}</td><td>${d.pool}</td><td>${d.name}</td><td>${d.deck_size}</td><td><button onclick=\"showDeck('${d.deck_id}')\">View</button> <button onclick=\"editDeck('${d.deck_id}')\" style=\"background:#0f766e;border-color:#0f766e\">Edit</button> <button onclick=\"renameDeck('${d.deck_id}')\" style=\"background:#7c3aed;border-color:#7c3aed\">Rename</button> <button onclick=\"deleteDeck('${d.deck_id}')\" style=\"background:#b91c1c;border-color:#b91c1c\">Remove</button></td>`;tb.appendChild(tr);});}
+function getSelectedDeckIds(){
+  return Array.from(document.querySelectorAll('#decksTbody .deckCheck:checked'))
+    .map(el=>String(el.value||'').trim())
+    .filter(v=>v!=='');
+}
+function toggleAllDeckChecks(checked){
+  const on=Boolean(checked);
+  document.querySelectorAll('#decksTbody .deckCheck').forEach(el=>{el.checked=on;});
+  const all=document.getElementById('deckCheckAll');
+  if(all) all.checked=on;
+}
+function syncDeckCheckAll(){
+  const boxes=Array.from(document.querySelectorAll('#decksTbody .deckCheck'));
+  const all=document.getElementById('deckCheckAll');
+  if(!all) return;
+  all.checked=boxes.length>0 && boxes.every(el=>el.checked);
+}
+function renderDecks(decks){const tb=document.getElementById('decksTbody');tb.innerHTML='';decks.forEach(d=>{const tr=document.createElement('tr');tr.innerHTML=`<td><input class=\"deckCheck\" type=\"checkbox\" value=\"${d.deck_id}\" style=\"width:auto;margin:0\" onchange=\"syncDeckCheckAll()\"/></td><td>${d.deck_id}</td><td>${d.pool}</td><td>${d.name}</td><td>${d.deck_size}</td><td><button onclick=\"showDeck('${d.deck_id}')\">View</button> <button onclick=\"editDeck('${d.deck_id}')\" style=\"background:#0f766e;border-color:#0f766e\">Edit</button> <button onclick=\"renameDeck('${d.deck_id}')\" style=\"background:#7c3aed;border-color:#7c3aed\">Rename</button> <button onclick=\"deleteDeck('${d.deck_id}')\" style=\"background:#b91c1c;border-color:#b91c1c\">Remove</button></td>`;tb.appendChild(tr);});syncDeckCheckAll();}
 function renderSims(sims){const tb=document.getElementById('simsTbody');tb.innerHTML='';sims.forEach(s=>{const tr=document.createElement('tr');const wr=((s.overall?.win_rate||0)*100).toFixed(2)+'%';const illegal=Number(s.overall?.illegal_actions||0);tr.innerHTML=`<td>${s.sim_id}</td><td>${s.candidate_deck_id}</td><td>${wr}</td><td>${s.overall?.games||0}</td><td>${illegal}</td><td><button onclick=\"showSim('${s.sim_id}')\">Analyze</button></td>`;tb.appendChild(tr);});}
 async function uploadDeck(){
   if(editingDeckId!==''){
@@ -609,6 +639,50 @@ async function deleteDeck(id){
     await refreshAll();
   }catch(e){
     msg.textContent='Error: '+e.message;
+  }
+}
+async function bulkDeleteSelectedDecks(){
+  const ids=getSelectedDeckIds();
+  const msg=document.getElementById('uploadMsg');
+  if(ids.length===0){
+    if(msg) msg.textContent='Select at least one deck to delete.';
+    return;
+  }
+  const ok=window.confirm(`Delete ${ids.length} selected deck(s)?`);
+  if(!ok) return;
+  if(msg) msg.textContent='Deleting selected decks...';
+  try{
+    const out=await api('/api/decks/bulk-delete',{method:'POST',body:JSON.stringify({deck_ids:ids})});
+    const removed=Array.isArray(out?.removed)?out.removed:[];
+    if(editingDeckId!=='' && removed.some(d=>String(d?.deck_id||'')===editingDeckId)) setDeckEditMode('');
+    if(msg) msg.textContent=`Deleted ${removed.length} deck(s).`;
+    const deckView=document.getElementById('deckView');
+    if(deckView) deckView.textContent='Select a deck to view SWUDB JSON.';
+    await refreshAll();
+  }catch(e){
+    if(msg) msg.textContent='Error: '+e.message;
+  }
+}
+async function bulkDeletePoolDecks(){
+  const pool=String(document.getElementById('bulkDeletePool')?.value||'').trim();
+  const msg=document.getElementById('uploadMsg');
+  if(pool===''){
+    if(msg) msg.textContent='Select a pool to delete.';
+    return;
+  }
+  const ok=window.confirm(`Delete all decks in pool '${pool}'?`);
+  if(!ok) return;
+  if(msg) msg.textContent=`Deleting pool ${pool}...`;
+  try{
+    const out=await api('/api/decks/bulk-delete',{method:'POST',body:JSON.stringify({pool})});
+    const removed=Array.isArray(out?.removed)?out.removed:[];
+    if(editingDeckId!=='' && removed.some(d=>String(d?.deck_id||'')===editingDeckId)) setDeckEditMode('');
+    if(msg) msg.textContent=`Deleted ${removed.length} deck(s) from pool ${pool}.`;
+    const deckView=document.getElementById('deckView');
+    if(deckView) deckView.textContent='Select a deck to view SWUDB JSON.';
+    await refreshAll();
+  }catch(e){
+    if(msg) msg.textContent='Error: '+e.message;
   }
 }
 function buildCreateSimPayload(){
@@ -2686,8 +2760,8 @@ def _build_ml_job_command(payload: dict[str, Any]) -> tuple[str, list[str], dict
         if not candidate:
             raise ValueError("candidate is required for sim_create")
         opponents = str(payload.get("opponents", "all")).strip()
-        if opponents not in {"all", "meta", "starter", "random"}:
-            raise ValueError("opponents must be all/meta/starter/random")
+        if opponents not in set(cli.OPPONENT_SET_CHOICES):
+            raise ValueError(f"opponents must be {'/'.join(cli.OPPONENT_SET_CHOICES)}")
         min_cards = cli._coerce_min_cards(payload.get("min_cards", cli.DEFAULT_MIN_DECK_SIZE))
         policy = str(payload.get("policy", "random_legal")).strip()
         if policy not in cli.SUPPORTED_POLICIES:
@@ -2733,8 +2807,8 @@ def _build_ml_job_command(payload: dict[str, Any]) -> tuple[str, list[str], dict
         if not candidate:
             raise ValueError("candidate is required for sim_shootout")
         opponents = str(payload.get("opponents", "all")).strip()
-        if opponents not in {"all", "meta", "starter", "random"}:
-            raise ValueError("opponents must be all/meta/starter/random")
+        if opponents not in set(cli.OPPONENT_SET_CHOICES):
+            raise ValueError(f"opponents must be {'/'.join(cli.OPPONENT_SET_CHOICES)}")
         min_cards = cli._coerce_min_cards(payload.get("min_cards", cli.DEFAULT_MIN_DECK_SIZE))
         games = _parse_int_field(payload, "games", 30, minimum=1)
         seed = _parse_int_field(payload, "seed", 123)
@@ -2778,8 +2852,8 @@ def _build_ml_job_command(payload: dict[str, Any]) -> tuple[str, list[str], dict
         if not candidate:
             raise ValueError("candidate is required for rl_collect")
         opponents = str(payload.get("opponents", "all")).strip()
-        if opponents not in {"all", "meta", "starter", "random"}:
-            raise ValueError("opponents must be all/meta/starter/random")
+        if opponents not in set(cli.OPPONENT_SET_CHOICES):
+            raise ValueError(f"opponents must be {'/'.join(cli.OPPONENT_SET_CHOICES)}")
         min_cards = cli._coerce_min_cards(payload.get("min_cards", cli.DEFAULT_MIN_DECK_SIZE))
         games = _parse_int_field(payload, "games", 25, minimum=1)
         seed = _parse_int_field(payload, "seed", 123)
@@ -3612,12 +3686,42 @@ class SimWebHandler(BaseHTTPRequestHandler):
                 updated = cli._rename_deck(deck_id, name=name, author=author)
                 self._send_json({"ok": True, "deck_id": updated.deck_id, "name": updated.name, "author": updated.author})
                 return
+            if path == "/api/decks/bulk-delete":
+                payload = self._read_json()
+                ids_raw = payload.get("deck_ids", [])
+                if ids_raw is None:
+                    ids_raw = []
+                if not isinstance(ids_raw, list):
+                    raise ValueError("deck_ids must be an array of deck ids")
+                deck_ids = [str(v).strip() for v in ids_raw if str(v).strip() != ""]
+                pool_raw = payload.get("pool", None)
+                pool = None
+                if pool_raw is not None:
+                    pool = str(pool_raw).strip()
+                    if pool == "":
+                        pool = None
+                removed = cli._delete_decks(deck_ids=deck_ids, pool=pool)
+                self._send_json(
+                    {
+                        "ok": True,
+                        "count": len(removed),
+                        "removed": [
+                            {
+                                "deck_id": d.deck_id,
+                                "pool": d.pool,
+                                "name": d.name,
+                            }
+                            for d in removed
+                        ],
+                    }
+                )
+                return
             if path == "/api/decks/random":
                 payload = self._read_json()
                 count = _parse_int_field(payload, "count", 1, minimum=1)
                 pool = str(payload.get("pool", "candidate")).strip() or "candidate"
-                if pool not in {"candidate", "meta", "starter"}:
-                    raise ValueError("pool must be candidate/meta/starter")
+                if pool not in cli.DECK_POOL_SET:
+                    raise ValueError(f"pool must be {'/'.join(cli.DECK_POOLS)}")
                 main_size = cli._coerce_min_cards(payload.get("main_size", cli.DEFAULT_MIN_DECK_SIZE))
                 seed_raw = payload.get("seed", None)
                 seed = None if seed_raw in (None, "") else int(seed_raw)
@@ -3668,8 +3772,8 @@ class SimWebHandler(BaseHTTPRequestHandler):
                 if any(d.deck_id == deck_id for d in decks):
                     raise ValueError(f"Deck id already exists: {deck_id}")
                 pool = str(payload.get("pool") or "candidate")
-                if pool not in {"candidate", "meta", "starter"}:
-                    raise ValueError("pool must be candidate/meta/starter")
+                if pool not in cli.DECK_POOL_SET:
+                    raise ValueError(f"pool must be {'/'.join(cli.DECK_POOLS)}")
                 deck = cli.DeckRecord(deck_id=deck_id, pool=pool, swudb=swudb, added_at=cli._now_iso())
                 decks.append(deck)
                 cli._save_decks(decks)
@@ -3682,8 +3786,8 @@ class SimWebHandler(BaseHTTPRequestHandler):
                 if policy not in {"random_non_pass", "random_legal", "first_non_pass", "heuristic", "mcts"}:
                     raise ValueError("policy must be random_non_pass/random_legal/first_non_pass/heuristic/mcts")
                 opponents = str(payload.get("opponents", "all")).strip()
-                if opponents not in {"all", "meta", "starter", "random"}:
-                    raise ValueError("opponents must be all/meta/starter/random")
+                if opponents not in set(cli.OPPONENT_SET_CHOICES):
+                    raise ValueError(f"opponents must be {'/'.join(cli.OPPONENT_SET_CHOICES)}")
                 args = type("Args", (), {
                     "candidate": payload.get("candidate"),
                     "opponents": opponents,
@@ -3785,8 +3889,8 @@ class SimWebHandler(BaseHTTPRequestHandler):
                 pool = None
                 if pool_raw is not None:
                     pool = str(pool_raw).strip()
-                    if pool not in {"candidate", "meta", "starter"}:
-                        raise ValueError("pool must be candidate/meta/starter")
+                    if pool not in cli.DECK_POOL_SET:
+                        raise ValueError(f"pool must be {'/'.join(cli.DECK_POOLS)}")
                 updated = cli._update_deck(deck_id, swudb=swudb, pool=pool)
                 self._send_json({"ok": True, "deck_id": updated.deck_id, "name": updated.name, "pool": updated.pool, "warnings": warnings})
                 return
