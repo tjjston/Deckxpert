@@ -28,9 +28,12 @@ body{font-family:system-ui,sans-serif;margin:0;background:#0f172a;color:#e2e8f0}
 .page{padding:14px}
 .card{background:#111827;border:1px solid #334155;border-radius:10px;padding:12px;margin-bottom:12px;overflow:auto}label{display:block;margin:8px 0 4px;font-size:12px;color:#94a3b8}
 input,select,textarea,button{width:100%;box-sizing:border-box;margin-bottom:8px;border-radius:8px;border:1px solid #334155;background:#0b1220;color:#e2e8f0;padding:8px}
-textarea{min-height:120px;font-family:ui-monospace,monospace}button{background:#1d4ed8;border-color:#1d4ed8;cursor:pointer}button:hover{background:#1e40af}
-table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:auto}th,td{border-bottom:1px solid #334155;text-align:left;padding:6px;font-size:12px;vertical-align:top;white-space:nowrap;overflow-wrap:normal;word-break:normal}.grid{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:12px}
-.topTiles{display:grid;grid-template-columns:repeat(4,minmax(260px,1fr));gap:12px;align-items:start;margin-bottom:12px}
+textarea{min-height:120px;font-family:ui-monospace,monospace}
+button{background:#1d4ed8;border-color:#1d4ed8;cursor:pointer;padding:6px 10px;font-size:12px;line-height:1.2}
+button:hover{background:#1e40af}
+table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:auto}th,td{border-bottom:1px solid #334155;text-align:left;padding:6px;font-size:12px;vertical-align:top;white-space:nowrap;overflow-wrap:normal;word-break:normal}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.topTiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;align-items:start;margin-bottom:12px}
+.card td button{width:auto;margin:0 4px 0 0;padding:4px 8px;font-size:11px}
 .mlGrid{display:grid;grid-template-columns:repeat(3,minmax(260px,1fr));gap:12px}
 .singleMatchGrid{display:grid;grid-template-columns:minmax(0,2fr) minmax(360px,1fr);gap:12px;align-items:start}
 .tabBar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
@@ -41,7 +44,7 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 .replayControls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .replayControls button{width:auto}
 .replayControls input[type=range]{flex:1;min-width:200px}
-@media (max-width:1400px){.topTiles{grid-template-columns:repeat(2,minmax(260px,1fr))}}
+@media (max-width:1400px){.topTiles{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}}
 @media (max-width:1200px){.singleMatchGrid{grid-template-columns:1fr}.topTiles{grid-template-columns:1fr}.mlGrid{grid-template-columns:1fr}.replayGrid{grid-template-columns:1fr}}
 .muted{color:#94a3b8;font-size:12px}pre{white-space:pre;overflow:auto;background:#020617;border:1px solid #334155;border-radius:8px;padding:10px}
 .ok{color:#22c55e}.bad{color:#ef4444}
@@ -103,7 +106,7 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 
 <div class=\"card\" data-tab=\"sim\"><h3>Create Simulation</h3>
 <label>Candidate Deck</label><select id=\"candidate\"></select>
-<label>Opponent Set</label><select id=\"opponents\"><option>all</option><option>meta</option><option>starter</option></select>
+<label>Opponent Set</label><select id=\"opponents\"><option>all</option><option>meta</option><option>starter</option><option>random</option></select>
 <label>Deck Minimum</label><select id=\"simMinCards\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
 <label>Policy</label><select id=\"simPolicy\"><option value=\"random_legal\">Random legal (uniform)</option><option value=\"random_non_pass\">Random legal (prefer non-pass)</option><option value=\"first_non_pass\">First non-pass (legacy)</option><option value=\"heuristic\">Heuristic (rule-based)</option><option value=\"mcts\">MCTS starter</option></select>
 <label>MCTS Iterations</label><input id=\"simMctsIterations\" type=\"number\" value=\"16\"/>
@@ -115,14 +118,37 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 <label>Simulation ID (optional)</label><input id=\"simId\" placeholder=\"sim-my-run\"/>
 <button onclick=\"createSimulation()\">Run Simulation</button><div id=\"simMsg\" class=\"muted\"></div></div>
 
-<div class=\"card\" data-tab=\"ml\"><h3>How To Use (ML Phases)</h3>
+<div class=\"card\" data-tab=\"ml\"><h3>How To Use (ML Iteration Loop)</h3>
 <div class=\"muted\">
-1) Deck phase: use <strong>Deck Studio</strong> to import/edit/delete decks and generate random candidates.<br/>
-2) Sim phase: use <strong>Sim Output</strong> to run single matches and create benchmark simulations.<br/>
-3) Collect phase: in <strong>ML Training</strong>, run <code>RL Collect</code> with policies like <code>heuristic,mcts</code>.<br/>
-4) Train phase: run <code>RL Train</code> on the collected dataset (GPU optional via <code>CUDA_VISIBLE_DEVICES</code>).<br/>
-5) Evaluate phase: run <code>sim create</code> or <code>sim shootout</code> again to compare policy quality.<br/>
-6) Replay phase: open <strong>SWU Replay</strong> to inspect step-by-step board state and both players' hands from the latest single match.
+Iteration N should run this loop:<br/>
+1) Self-play generation: produce games with current model/policy and capture <code>(state, policy, outcome)</code>.<br/>
+2) Dataset build: aggregate positions into <code>(state_tensor, policy_vector, value_target)</code> training rows.<br/>
+3) Train network: optimize policy + value heads on the generated dataset.<br/>
+4) Evaluate candidate: run new model vs previous/best model in head-to-head matches.<br/>
+5) Promote best model: only replace current best if evaluation threshold is met (example: >55% win rate).<br/>
+6) Update replay buffer: keep recent samples (for example last 500k positions), evict oldest data.<br/>
+<br/>
+Starter scope (Iteration 0):<br/>
+- games: <code>500</code><br/>
+- positions: <code>~10k</code><br/>
+- epochs: <code>5</code><br/>
+- eval games: <code>100</code><br/>
+<br/>
+Scaled scope (after end-to-end stability):<br/>
+- self-play games: <code>2000-10000</code><br/>
+- positions: <code>50k-200k</code><br/>
+- epochs: <code>5-20</code><br/>
+- batch size: <code>256-1024</code><br/>
+- lr schedule: <code>1e-3 -> 1e-4</code><br/>
+<br/>
+Compute split:<br/>
+- CPU threads: simulations/self-play<br/>
+- GPU: training + inference batches<br/>
+<br/>
+SWU-specific early strategy:<br/>
+- prioritize diverse states before perfect play<br/>
+- start with random + starter decks<br/>
+- expand later to meta + optimizer decks
 </div>
 <pre id=\"howToRuntime\" class=\"muted\">Runtime info loading...</pre>
 </div>
@@ -133,7 +159,7 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 <div class=\"card\"><h3>Simulation Job</h3>
 <label>Candidate Deck</label><select id=\"mlSimCandidate\"></select>
 <label>Mode</label><select id=\"mlSimKind\"><option value=\"sim_create\">sim create</option><option value=\"sim_shootout\">sim shootout</option></select>
-<label>Opponents</label><select id=\"mlSimOpponents\"><option>all</option><option>meta</option><option>starter</option></select>
+<label>Opponents</label><select id=\"mlSimOpponents\"><option>all</option><option>meta</option><option>starter</option><option>random</option></select>
 <label>Deck Minimum</label><select id=\"mlSimMinCards\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
 <label>Policy (sim create)</label><select id=\"mlSimPolicy\"><option value=\"random_legal\">random_legal</option><option value=\"random_non_pass\">random_non_pass</option><option value=\"first_non_pass\">first_non_pass</option><option value=\"heuristic\">heuristic</option><option value=\"mcts\">mcts</option></select>
 <label>Policies (sim shootout, csv)</label><input id=\"mlSimPolicies\" value=\"random_legal,heuristic,mcts\"/>
@@ -150,7 +176,7 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 </div>
 <div class=\"card\"><h3>RL Collect Job</h3>
 <label>Candidate Deck</label><select id=\"mlCollectCandidate\"></select>
-<label>Opponents</label><select id=\"mlCollectOpponents\"><option>all</option><option>meta</option><option>starter</option></select>
+<label>Opponents</label><select id=\"mlCollectOpponents\"><option>all</option><option>meta</option><option>starter</option><option>random</option></select>
 <label>Deck Minimum</label><select id=\"mlCollectMinCards\"><option value=\"50\" selected>50 cards</option><option value=\"30\">30 cards</option></select>
 <label>Policies (csv)</label><input id=\"mlCollectPolicies\" value=\"heuristic,mcts\"/>
 <label>MCTS Iterations</label><input id=\"mlCollectMctsIterations\" type=\"number\" value=\"24\"/>
@@ -186,6 +212,11 @@ table{width:max-content;min-width:100%;border-collapse:collapse;table-layout:aut
 <table><thead><tr><th>ID</th><th>Type</th><th>Status</th><th>GPU</th><th>Started</th><th>Ended</th><th>Exit</th><th></th></tr></thead><tbody id=\"mlJobsTbody\"></tbody></table>
 <div class=\"muted\" id=\"mlJobMeta\">Select a job to view full logs.</div>
 <pre id=\"mlJobLogs\" class=\"logBox\">No job selected.</pre>
+<h3>Learning Trends (Shootout)</h3>
+<div id=\"mlTrendInfo\" class=\"muted\">Loading trend data...</div>
+<table><thead><tr><th>Policy</th><th>Runs</th><th>Avg Win Rate</th><th>Best Win Rate</th><th>Last Win Rate</th><th>Avg Illegal</th></tr></thead><tbody id=\"mlTrendPolicyTbody\"></tbody></table>
+<table><thead><tr><th>Deck</th><th>Runs</th><th>Avg Best Win Rate</th><th>Best Observed</th><th>Last Best Policy</th><th>Random-only Runs</th></tr></thead><tbody id=\"mlTrendDeckTbody\"></tbody></table>
+<table><thead><tr><th>When</th><th>Candidate</th><th>Opponents</th><th>Best Policy</th><th>Best Win Rate</th><th>Games/Opp</th></tr></thead><tbody id=\"mlTrendRunsTbody\"></tbody></table>
 </div>
 <div class=\"grid\" data-tab-container=\"grid\">
 <div class=\"card\" data-tab=\"deck\"><h3>Decks</h3><table><thead><tr><th>ID</th><th>Pool</th><th>Name</th><th>Cards</th><th></th></tr></thead><tbody id=\"decksTbody\"></tbody></table></div>
@@ -691,6 +722,59 @@ function renderMlInfo(info){
   box.textContent=`Python: ${py} | CUDA_VISIBLE_DEVICES: ${visible} | ${gpuLine}`;
   renderRlArtifactLists(info?.rl_artifacts||[]);
 }
+function renderMlTrends(payload){
+  const info=document.getElementById('mlTrendInfo');
+  const policyTb=document.getElementById('mlTrendPolicyTbody');
+  const deckTb=document.getElementById('mlTrendDeckTbody');
+  const runsTb=document.getElementById('mlTrendRunsTbody');
+  if(!info || !policyTb || !deckTb || !runsTb) return;
+
+  const totalRuns=Number(payload?.total_runs||0);
+  const generatedAt=formatLocal(payload?.generated_at);
+  info.textContent=`Shootout runs tracked: ${totalRuns} | Updated: ${generatedAt}`;
+
+  policyTb.innerHTML='';
+  const policyRows=Array.isArray(payload?.policy_summary)?payload.policy_summary:[];
+  if(policyRows.length===0){
+    const tr=document.createElement('tr');
+    tr.innerHTML='<td colspan=\"6\" class=\"muted\">No shootout trend data yet. Run sim shootout jobs to build history.</td>';
+    policyTb.appendChild(tr);
+  }else{
+    policyRows.slice(0,12).forEach(row=>{
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td>${row.policy||''}</td><td>${row.runs||0}</td><td>${((Number(row.avg_win_rate)||0)*100).toFixed(2)}%</td><td>${((Number(row.best_win_rate)||0)*100).toFixed(2)}%</td><td>${((Number(row.last_win_rate)||0)*100).toFixed(2)}%</td><td>${Number(row.avg_illegal_actions||0).toFixed(2)}</td>`;
+      policyTb.appendChild(tr);
+    });
+  }
+
+  deckTb.innerHTML='';
+  const deckRows=Array.isArray(payload?.deck_summary)?payload.deck_summary:[];
+  if(deckRows.length===0){
+    const tr=document.createElement('tr');
+    tr.innerHTML='<td colspan=\"6\" class=\"muted\">No deck trend data yet.</td>';
+    deckTb.appendChild(tr);
+  }else{
+    deckRows.slice(0,12).forEach(row=>{
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td>${row.candidate_deck_id||''}</td><td>${row.runs||0}</td><td>${((Number(row.avg_best_win_rate)||0)*100).toFixed(2)}%</td><td>${((Number(row.best_observed_win_rate)||0)*100).toFixed(2)}%</td><td>${row.last_best_policy||'-'}</td><td>${row.random_only_runs||0}</td>`;
+      deckTb.appendChild(tr);
+    });
+  }
+
+  runsTb.innerHTML='';
+  const runs=Array.isArray(payload?.runs)?payload.runs:[];
+  if(runs.length===0){
+    const tr=document.createElement('tr');
+    tr.innerHTML='<td colspan=\"6\" class=\"muted\">No historical runs.</td>';
+    runsTb.appendChild(tr);
+  }else{
+    runs.slice(0,20).forEach(row=>{
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td>${formatLocal(row.created_at)}</td><td>${row.candidate_deck_id||''}</td><td>${row.opponent_set||''}${row.random_only?' (random-only)':''}</td><td>${row.best_policy||'-'}</td><td>${((Number(row.best_win_rate)||0)*100).toFixed(2)}%</td><td>${row.games_per_opponent||0}</td>`;
+      runsTb.appendChild(tr);
+    });
+  }
+}
 function renderMlJobs(jobs){
   const tb=document.getElementById('mlJobsTbody');
   if(!tb) return;
@@ -729,7 +813,17 @@ async function refreshMlJobs(){
     if(currentMlJobId!==''){
       await viewMlJob(currentMlJobId,false);
     }
+    await refreshMlTrends();
   }catch(_e){}
+}
+async function refreshMlTrends(){
+  try{
+    const out=await api('/api/ml/trends');
+    renderMlTrends(out);
+  }catch(e){
+    const info=document.getElementById('mlTrendInfo');
+    if(info) info.textContent='Trend info unavailable: '+e.message;
+  }
 }
 async function viewMlJob(jobId,focus=true){
   if(!jobId) return;
@@ -2359,8 +2453,8 @@ def _build_ml_job_command(payload: dict[str, Any]) -> tuple[str, list[str], dict
         if not candidate:
             raise ValueError("candidate is required for sim_create")
         opponents = str(payload.get("opponents", "all")).strip()
-        if opponents not in {"all", "meta", "starter"}:
-            raise ValueError("opponents must be all/meta/starter")
+        if opponents not in {"all", "meta", "starter", "random"}:
+            raise ValueError("opponents must be all/meta/starter/random")
         min_cards = cli._coerce_min_cards(payload.get("min_cards", cli.DEFAULT_MIN_DECK_SIZE))
         policy = str(payload.get("policy", "random_legal")).strip()
         if policy not in cli.SUPPORTED_POLICIES:
@@ -2406,8 +2500,8 @@ def _build_ml_job_command(payload: dict[str, Any]) -> tuple[str, list[str], dict
         if not candidate:
             raise ValueError("candidate is required for sim_shootout")
         opponents = str(payload.get("opponents", "all")).strip()
-        if opponents not in {"all", "meta", "starter"}:
-            raise ValueError("opponents must be all/meta/starter")
+        if opponents not in {"all", "meta", "starter", "random"}:
+            raise ValueError("opponents must be all/meta/starter/random")
         min_cards = cli._coerce_min_cards(payload.get("min_cards", cli.DEFAULT_MIN_DECK_SIZE))
         games = _parse_int_field(payload, "games", 30, minimum=1)
         seed = _parse_int_field(payload, "seed", 123)
@@ -2451,8 +2545,8 @@ def _build_ml_job_command(payload: dict[str, Any]) -> tuple[str, list[str], dict
         if not candidate:
             raise ValueError("candidate is required for rl_collect")
         opponents = str(payload.get("opponents", "all")).strip()
-        if opponents not in {"all", "meta", "starter"}:
-            raise ValueError("opponents must be all/meta/starter")
+        if opponents not in {"all", "meta", "starter", "random"}:
+            raise ValueError("opponents must be all/meta/starter/random")
         min_cards = cli._coerce_min_cards(payload.get("min_cards", cli.DEFAULT_MIN_DECK_SIZE))
         games = _parse_int_field(payload, "games", 25, minimum=1)
         seed = _parse_int_field(payload, "seed", 123)
@@ -2935,6 +3029,9 @@ class SimWebHandler(BaseHTTPRequestHandler):
             if path == "/api/ml/jobs":
                 self._send_json({"jobs": ML_JOB_MANAGER.list()})
                 return
+            if path == "/api/ml/trends":
+                self._send_json(cli._build_shootout_trends(limit=500))
+                return
             if path.startswith("/api/ml/jobs/"):
                 job_id = path[len("/api/ml/jobs/") :].strip("/")
                 if not job_id:
@@ -3060,9 +3157,12 @@ class SimWebHandler(BaseHTTPRequestHandler):
                 policy = str(payload.get("policy", "random_legal"))
                 if policy not in {"random_non_pass", "random_legal", "first_non_pass", "heuristic", "mcts"}:
                     raise ValueError("policy must be random_non_pass/random_legal/first_non_pass/heuristic/mcts")
+                opponents = str(payload.get("opponents", "all")).strip()
+                if opponents not in {"all", "meta", "starter", "random"}:
+                    raise ValueError("opponents must be all/meta/starter/random")
                 args = type("Args", (), {
                     "candidate": payload.get("candidate"),
-                    "opponents": payload.get("opponents", "all"),
+                    "opponents": opponents,
                     "min_cards": cli._coerce_min_cards(payload.get("min_cards", cli.DEFAULT_MIN_DECK_SIZE)),
                     "policy": policy,
                     "mcts_iterations": int(payload.get("mcts_iterations", 16)),

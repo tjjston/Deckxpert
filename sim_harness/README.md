@@ -219,6 +219,11 @@ Outputs from `rl collect`:
 - `<prefix>.vocab.json`: action vocabulary used for policy targets.
 - `<prefix>.meta.json`: collection settings and summary counts.
 
+Training details:
+- Value targets are from the acting player's perspective in `[-1, 0, 1]` (loss/draw/win).
+- Policy head is trained with `-sum(target_policy * log_softmax(masked_logits))`.
+- Legal-action masks are built from each logged step's legal action list when available.
+
 Requirements for `rl train`:
 - `numpy`
 - `torch` (PyTorch)

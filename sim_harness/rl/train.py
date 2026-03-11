@@ -20,6 +20,13 @@ def _resolve_device(device: str) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def _masked_log_softmax(logits, legal_mask):
+    """Apply legal-action mask before log-softmax."""
+    neg_inf = torch.finfo(logits.dtype).min
+    masked_logits = logits.masked_fill(legal_mask <= 0, neg_inf)
+    return torch.log_softmax(masked_logits, dim=1)
+
+
 def train_policy_value_model(
     dataset_path: str,
     vocab_path: str,
@@ -50,13 +57,15 @@ def train_policy_value_model(
 
     rows = load_dataset_rows(dataset_path)
     vocab = ActionVocab.load_json(vocab_path)
-    x_np, y_pi_np, y_v_np = vectorize_rows(rows, vocab)
+    x_np, y_pi_np, y_v_np, y_mask_np, y_action_idx_np = vectorize_rows(rows, vocab)
 
     n = int(x_np.shape[0])
     perm = np.random.permutation(n)
     x_np = x_np[perm]
     y_pi_np = y_pi_np[perm]
     y_v_np = y_v_np[perm]
+    y_mask_np = y_mask_np[perm]
+    y_action_idx_np = y_action_idx_np[perm]
 
     n_val = int(n * val_split)
     n_train = n - n_val
@@ -65,15 +74,21 @@ def train_policy_value_model(
 
     x_train, y_pi_train, y_v_train = x_np[:n_train], y_pi_np[:n_train], y_v_np[:n_train]
     x_val, y_pi_val, y_v_val = x_np[n_train:], y_pi_np[n_train:], y_v_np[n_train:]
+    y_mask_train, y_mask_val = y_mask_np[:n_train], y_mask_np[n_train:]
+    y_action_idx_train, y_action_idx_val = y_action_idx_np[:n_train], y_action_idx_np[n_train:]
 
     dev = _resolve_device(device)
     x_train_t = torch.from_numpy(x_train).to(dev)
     y_pi_train_t = torch.from_numpy(y_pi_train).to(dev)
     y_v_train_t = torch.from_numpy(y_v_train).to(dev)
+    y_mask_train_t = torch.from_numpy(y_mask_train).to(dev)
+    y_action_idx_train_t = torch.from_numpy(y_action_idx_train).to(dev)
 
     x_val_t = torch.from_numpy(x_val).to(dev) if n_val > 0 else None
     y_pi_val_t = torch.from_numpy(y_pi_val).to(dev) if n_val > 0 else None
     y_v_val_t = torch.from_numpy(y_v_val).to(dev) if n_val > 0 else None
+    y_mask_val_t = torch.from_numpy(y_mask_val).to(dev) if n_val > 0 else None
+    y_action_idx_val_t = torch.from_numpy(y_action_idx_val).to(dev) if n_val > 0 else None
 
     model = PolicyValueNet(
         input_dim=int(x_np.shape[1]),
@@ -83,7 +98,6 @@ def train_policy_value_model(
         dropout=dropout,
     ).to(dev)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    ce = torch.nn.CrossEntropyLoss()
     mse = torch.nn.MSELoss()
 
     history: list[dict[str, float]] = []
@@ -99,17 +113,21 @@ def train_policy_value_model(
             xb = x_train_t[start:end]
             yb_pi = y_pi_train_t[start:end]
             yb_v = y_v_train_t[start:end]
+            yb_mask = y_mask_train_t[start:end]
+            yb_action_idx = y_action_idx_train_t[start:end]
             optimizer.zero_grad(set_to_none=True)
             logits, v_pred = model(xb)
-            loss_pi = ce(logits, yb_pi)
+            log_probs = _masked_log_softmax(logits, yb_mask)
+            loss_pi = -(yb_pi * log_probs).sum(dim=1).mean()
             loss_v = mse(v_pred, yb_v)
             loss = loss_pi + (value_loss_weight * loss_v)
             loss.backward()
             optimizer.step()
 
             with torch.no_grad():
-                pred = torch.argmax(logits, dim=1)
-                acc = (pred == yb_pi).float().mean().item()
+                masked_logits = logits.masked_fill(yb_mask <= 0, torch.finfo(logits.dtype).min)
+                pred = torch.argmax(masked_logits, dim=1)
+                acc = (pred == yb_action_idx).float().mean().item()
             train_losses.append(float(loss.item()))
             train_pi_losses.append(float(loss_pi.item()))
             train_v_losses.append(float(loss_v.item()))
@@ -123,14 +141,23 @@ def train_policy_value_model(
             "train_policy_acc": float(np.mean(train_acc) if train_acc else 0.0),
         }
 
-        if n_val > 0 and x_val_t is not None and y_pi_val_t is not None and y_v_val_t is not None:
+        if (
+            n_val > 0
+            and x_val_t is not None
+            and y_pi_val_t is not None
+            and y_v_val_t is not None
+            and y_mask_val_t is not None
+            and y_action_idx_val_t is not None
+        ):
             model.eval()
             with torch.no_grad():
                 logits_val, v_val_pred = model(x_val_t)
-                val_pi_loss = ce(logits_val, y_pi_val_t).item()
+                log_probs_val = _masked_log_softmax(logits_val, y_mask_val_t)
+                val_pi_loss = float((-(y_pi_val_t * log_probs_val).sum(dim=1).mean()).item())
                 val_v_loss = mse(v_val_pred, y_v_val_t).item()
                 val_loss = val_pi_loss + (value_loss_weight * val_v_loss)
-                val_acc = (torch.argmax(logits_val, dim=1) == y_pi_val_t).float().mean().item()
+                masked_logits_val = logits_val.masked_fill(y_mask_val_t <= 0, torch.finfo(logits_val.dtype).min)
+                val_acc = (torch.argmax(masked_logits_val, dim=1) == y_action_idx_val_t).float().mean().item()
             row["val_loss"] = float(val_loss)
             row["val_policy_loss"] = float(val_pi_loss)
             row["val_value_loss"] = float(val_v_loss)

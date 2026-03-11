@@ -22,6 +22,7 @@ from .runner import MatchResult, run_benchmark
 DATA_DIR = Path("sim_harness") / "data"
 DECKS_FILE = DATA_DIR / "decks.json"
 SIMS_FILE = DATA_DIR / "simulations.json"
+SHOOTOUT_HISTORY_FILE = DATA_DIR / "shootout_history.jsonl"
 GENERATED_CARD_DICT_FILE = Path("GeneratedCode") / "GeneratedCardDictionaries.php"
 SUPPORTED_MIN_DECK_SIZES = {30, 50}
 DEFAULT_MIN_DECK_SIZE = 50
@@ -270,6 +271,9 @@ def _create_random_decks(
             "metadata": {
                 "name": display_name,
                 "author": author_clean,
+                "source": "deckxpert_random",
+                "deckxpert_random": True,
+                "generated_at": _now_iso(),
             },
             "leader": {"id": leader_id, "count": 1},
             "base": {"id": base_id, "count": 1},
@@ -486,6 +490,21 @@ def _find_deck(decks: list[DeckRecord], deck_id: str) -> DeckRecord:
     raise ValueError(f"Deck not found: {deck_id}")
 
 
+def _is_random_deck(deck: DeckRecord) -> bool:
+    metadata = deck.swudb.get("metadata", {})
+    if isinstance(metadata, dict):
+        if bool(metadata.get("deckxpert_random", False)):
+            return True
+        source = str(metadata.get("source", "")).strip().lower()
+        if source == "deckxpert_random":
+            return True
+        author = str(metadata.get("author", "")).strip().lower()
+        if author == "sim_harness_random":
+            return True
+    deck_id = str(deck.deck_id).strip().lower()
+    return deck_id.startswith("random-") or deck_id.startswith("looprand-")
+
+
 def _delete_deck(deck_id: str) -> DeckRecord:
     decks = _load_decks()
     target = _find_deck(decks, deck_id)
@@ -628,6 +647,177 @@ def _save_sims(sims: list[dict[str, Any]]) -> None:
     _write_json_list(SIMS_FILE, sims)
 
 
+def _append_shootout_history(payload: dict[str, Any]) -> None:
+    SHOOTOUT_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _safe_daily_backup(refresh_today=True)
+    with SHOOTOUT_HISTORY_FILE.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
+
+
+def _load_shootout_history(limit: int = 200) -> list[dict[str, Any]]:
+    if limit < 1:
+        return []
+    if not SHOOTOUT_HISTORY_FILE.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    lines = SHOOTOUT_HISTORY_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
+    for raw in reversed(lines):
+        text = raw.strip()
+        if text == "":
+            continue
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        rows.append(obj)
+        if len(rows) >= int(limit):
+            break
+    return rows
+
+
+def _build_shootout_trends(limit: int = 200) -> dict[str, Any]:
+    runs = _load_shootout_history(limit=limit)
+    policy_rollup: dict[str, dict[str, Any]] = {}
+    deck_rollup: dict[str, dict[str, Any]] = {}
+    run_rows: list[dict[str, Any]] = []
+
+    for run in runs:
+        ranked_rows = run.get("ranked", [])
+        ranked = ranked_rows if isinstance(ranked_rows, list) else []
+        candidate_id = str(run.get("candidate_deck_id", "")).strip()
+        candidate_name = str(run.get("candidate_name", "")).strip()
+        created_at = str(run.get("created_at", "")).strip()
+        opponent_set = str(run.get("opponent_set", "")).strip()
+        random_only = bool(run.get("random_only", False))
+        games_per_opponent = int(run.get("games_per_opponent", 0) or 0)
+        opponent_count = int(run.get("opponent_count", 0) or 0)
+
+        if ranked:
+            best = ranked[0] if isinstance(ranked[0], dict) else {}
+            best_policy = str(best.get("policy", "")).strip()
+            best_win_rate = float(best.get("win_rate", 0.0) or 0.0)
+            best_illegal = int(best.get("illegal_actions", 0) or 0)
+        else:
+            best_policy = ""
+            best_win_rate = 0.0
+            best_illegal = 0
+
+        run_rows.append(
+            {
+                "created_at": created_at,
+                "candidate_deck_id": candidate_id,
+                "candidate_name": candidate_name,
+                "opponent_set": opponent_set,
+                "random_only": random_only,
+                "games_per_opponent": games_per_opponent,
+                "opponent_count": opponent_count,
+                "best_policy": best_policy,
+                "best_win_rate": round(best_win_rate, 4),
+                "best_illegal_actions": best_illegal,
+            }
+        )
+
+        if candidate_id != "":
+            deck_entry = deck_rollup.setdefault(
+                candidate_id,
+                {
+                    "candidate_deck_id": candidate_id,
+                    "candidate_name": candidate_name or candidate_id,
+                    "runs": 0,
+                    "sum_best_win_rate": 0.0,
+                    "best_observed_win_rate": 0.0,
+                    "last_best_policy": "",
+                    "last_created_at": "",
+                    "random_only_runs": 0,
+                },
+            )
+            deck_entry["runs"] += 1
+            deck_entry["sum_best_win_rate"] += best_win_rate
+            deck_entry["best_observed_win_rate"] = max(float(deck_entry["best_observed_win_rate"]), best_win_rate)
+            if best_policy != "":
+                deck_entry["last_best_policy"] = best_policy
+            if created_at != "":
+                deck_entry["last_created_at"] = created_at
+            if random_only:
+                deck_entry["random_only_runs"] += 1
+
+        for row in ranked:
+            if not isinstance(row, dict):
+                continue
+            policy = str(row.get("policy", "")).strip()
+            if policy == "":
+                continue
+            wr = float(row.get("win_rate", 0.0) or 0.0)
+            illegal = int(row.get("illegal_actions", 0) or 0)
+            entry = policy_rollup.setdefault(
+                policy,
+                {
+                    "policy": policy,
+                    "runs": 0,
+                    "sum_win_rate": 0.0,
+                    "best_win_rate": 0.0,
+                    "last_win_rate": 0.0,
+                    "sum_illegal_actions": 0,
+                    "last_seen_at": "",
+                },
+            )
+            entry["runs"] += 1
+            entry["sum_win_rate"] += wr
+            entry["best_win_rate"] = max(float(entry["best_win_rate"]), wr)
+            entry["last_win_rate"] = wr
+            entry["sum_illegal_actions"] += illegal
+            if created_at != "":
+                entry["last_seen_at"] = created_at
+
+    policy_summary = []
+    for entry in policy_rollup.values():
+        runs_count = int(entry["runs"])
+        avg_wr = (float(entry["sum_win_rate"]) / runs_count) if runs_count > 0 else 0.0
+        avg_illegal = (int(entry["sum_illegal_actions"]) / runs_count) if runs_count > 0 else 0.0
+        policy_summary.append(
+            {
+                "policy": entry["policy"],
+                "runs": runs_count,
+                "avg_win_rate": round(avg_wr, 4),
+                "best_win_rate": round(float(entry["best_win_rate"]), 4),
+                "last_win_rate": round(float(entry["last_win_rate"]), 4),
+                "avg_illegal_actions": round(avg_illegal, 2),
+                "last_seen_at": entry["last_seen_at"],
+            }
+        )
+    policy_summary.sort(key=lambda r: (-float(r["avg_win_rate"]), -int(r["runs"]), str(r["policy"])))
+
+    deck_summary = []
+    for entry in deck_rollup.values():
+        runs_count = int(entry["runs"])
+        avg_best = (float(entry["sum_best_win_rate"]) / runs_count) if runs_count > 0 else 0.0
+        deck_summary.append(
+            {
+                "candidate_deck_id": entry["candidate_deck_id"],
+                "candidate_name": entry["candidate_name"],
+                "runs": runs_count,
+                "avg_best_win_rate": round(avg_best, 4),
+                "best_observed_win_rate": round(float(entry["best_observed_win_rate"]), 4),
+                "last_best_policy": entry["last_best_policy"],
+                "last_created_at": entry["last_created_at"],
+                "random_only_runs": int(entry["random_only_runs"]),
+            }
+        )
+    deck_summary.sort(
+        key=lambda r: (-float(r["avg_best_win_rate"]), -int(r["runs"]), str(r["candidate_deck_id"]))
+    )
+
+    return {
+        "generated_at": _now_iso(),
+        "total_runs": len(run_rows),
+        "runs": run_rows,
+        "policy_summary": policy_summary,
+        "deck_summary": deck_summary,
+    }
+
+
 def _extract_illegal_event_rows(
     results: list[MatchResult],
     opponents: list[DeckRecord],
@@ -745,26 +935,8 @@ def _extract_illegal_event_rows(
 
 
 def cmd_sim_create(args: argparse.Namespace) -> int:
-    decks = _load_decks()
-    candidate = _find_deck(decks, args.candidate)
     min_cards = _coerce_min_cards(getattr(args, "min_cards", DEFAULT_MIN_DECK_SIZE))
-    _assert_min_deck_size(candidate.swudb, min_cards, f"Candidate deck '{candidate.deck_id}'")
-
-    if args.opponents == "all":
-        opponents = [d for d in decks if d.deck_id != candidate.deck_id and d.pool in {"meta", "starter"}]
-    else:
-        opponents = [d for d in decks if d.deck_id != candidate.deck_id and d.pool == args.opponents]
-
-    if not opponents:
-        raise ValueError("No opponent decks found for selected set. Upload decks to meta/starter pools first.")
-    invalid_opponents = [d for d in opponents if _deck_main_count(d.swudb) < min_cards]
-    if invalid_opponents:
-        sample = ", ".join(f"{d.deck_id}({_deck_main_count(d.swudb)})" for d in invalid_opponents[:8])
-        more = f" (+{len(invalid_opponents)-8} more)" if len(invalid_opponents) > 8 else ""
-        raise ValueError(
-            f"Opponent decks below minimum {min_cards} cards: {sample}{more}. "
-            "Use a lower minimum or upload larger decks."
-        )
+    candidate, opponents = _resolve_candidate_and_opponents(args.candidate, args.opponents, min_cards)
 
     deck_pairs = [(_deck_to_runner_string(candidate.swudb), _deck_to_runner_string(o.swudb)) for o in opponents]
     results = run_benchmark(
@@ -1198,10 +1370,21 @@ def _resolve_candidate_and_opponents(
 
     if opponent_set == "all":
         opponents = [d for d in decks if d.deck_id != candidate.deck_id and d.pool in {"meta", "starter"}]
+    elif opponent_set == "random":
+        if not _is_random_deck(candidate):
+            raise ValueError(
+                "Candidate must be a random deck when opponents=random. "
+                "Generate one with deck random --pool candidate."
+            )
+        opponents = [d for d in decks if d.deck_id != candidate.deck_id and _is_random_deck(d)]
     else:
         opponents = [d for d in decks if d.deck_id != candidate.deck_id and d.pool == opponent_set]
 
     if not opponents:
+        if opponent_set == "random":
+            raise ValueError(
+                "No random opponent decks found. Generate random decks for meta/starter or candidate pools first."
+            )
         raise ValueError("No opponent decks found for selected set. Upload decks to meta/starter pools first.")
     invalid_opponents = [d for d in opponents if _deck_main_count(d.swudb) < min_cards]
     if invalid_opponents:
@@ -1304,6 +1487,7 @@ def cmd_sim_shootout(args: argparse.Namespace) -> int:
         "candidate_deck_id": candidate.deck_id,
         "candidate_name": candidate.name,
         "opponent_set": args.opponents,
+        "random_only": bool(args.opponents == "random"),
         "opponent_count": len(opponents),
         "games_per_opponent": int(args.games),
         "seed": int(args.seed),
@@ -1312,6 +1496,7 @@ def cmd_sim_shootout(args: argparse.Namespace) -> int:
         "requested_policies": policies,
         "ranked": ranked,
     }
+    _append_shootout_history(payload)
 
     out_json = str(args.out_json or "").strip()
     if out_json != "":
@@ -1722,7 +1907,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sim_create = sim_sub.add_parser("create", help="Create a simulation for one candidate deck")
     sim_create.add_argument("--candidate", required=True, help="Candidate deck id")
-    sim_create.add_argument("--opponents", choices=["meta", "starter", "all"], default="all")
+    sim_create.add_argument("--opponents", choices=["meta", "starter", "all", "random"], default="all")
     sim_create.add_argument("--games", type=int, default=20, help="Games per opponent")
     sim_create.add_argument("--seed", type=int, default=42)
     sim_create.add_argument("--workers", type=int, default=4)
@@ -1752,7 +1937,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sim_shootout = sim_sub.add_parser("shootout", help="Compare multiple policies on the same matchup/seed set")
     sim_shootout.add_argument("--candidate", required=True, help="Candidate deck id")
-    sim_shootout.add_argument("--opponents", choices=["meta", "starter", "all"], default="all")
+    sim_shootout.add_argument("--opponents", choices=["meta", "starter", "all", "random"], default="all")
     sim_shootout.add_argument("--games", type=int, default=20, help="Games per opponent")
     sim_shootout.add_argument("--seed", type=int, default=42)
     sim_shootout.add_argument("--workers", type=int, default=4)
@@ -1773,7 +1958,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     rl_collect = rl_sub.add_parser("collect", help="Collect supervised policy/value dataset from simulated games")
     rl_collect.add_argument("--candidate", required=True, help="Candidate deck id")
-    rl_collect.add_argument("--opponents", choices=["meta", "starter", "all"], default="all")
+    rl_collect.add_argument("--opponents", choices=["meta", "starter", "all", "random"], default="all")
     rl_collect.add_argument("--games", type=int, default=20, help="Games per opponent")
     rl_collect.add_argument("--seed", type=int, default=42)
     rl_collect.add_argument("--workers", type=int, default=4)
@@ -1815,7 +2000,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include all decks from pool=candidate in each loop iteration",
     )
-    rl_loop.add_argument("--opponents", choices=["meta", "starter", "all"], default="all")
+    rl_loop.add_argument("--opponents", choices=["meta", "starter", "all", "random"], default="all")
     rl_loop.add_argument("--iterations", type=int, default=3)
     rl_loop.add_argument("--games", type=int, default=20, help="Self-play games per opponent during collection")
     rl_loop.add_argument("--eval-games", type=int, default=20, help="Evaluation games per opponent")

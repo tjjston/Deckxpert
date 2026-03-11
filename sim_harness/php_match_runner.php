@@ -1983,6 +1983,7 @@ for ($step = 1; $step <= $actionCap; ++$step) {
       'type' => $cardType,
       'keywords' => ($cardRefRaw !== '' ? cardKeywordFlags($cardRefRaw, $playerId) : []),
     ],
+    'legal_actions' => $legalActions,
     'legal_action_count' => count($legalActions),
     'legal_actions_by_type' => legalActionTypeSummary($legalActions),
     'apply_ok' => $ok,

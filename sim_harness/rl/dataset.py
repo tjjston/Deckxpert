@@ -13,8 +13,28 @@ from .encoding import encode_event_state
 
 def _winner_value_target(winner: int, player_id: int) -> float:
     if winner not in (1, 2):
-        return 0.5
-    return 1.0 if winner == player_id else 0.0
+        return 0.0
+    return 1.0 if winner == player_id else -1.0
+
+
+def _extract_legal_action_keys(event: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    legal_actions = event.get("legal_actions", [])
+    if not isinstance(legal_actions, list):
+        return out
+    seen: set[str] = set()
+    for legal_action in legal_actions:
+        if not isinstance(legal_action, dict):
+            continue
+        try:
+            key = canonical_action_key(legal_action)
+        except Exception:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
 
 
 def build_training_rows_from_outcome(
@@ -63,6 +83,7 @@ def build_training_rows_from_outcome(
             "action_type": str(action.get("type", "unknown") or "unknown"),
             "legal_action_count": int(event.get("legal_action_count", 0) or 0),
             "legal_actions_by_type": event.get("legal_actions_by_type", {}) if isinstance(event.get("legal_actions_by_type"), dict) else {},
+            "legal_action_keys": _extract_legal_action_keys(event),
             "source_policy": source_policy,
             "features": features.tolist(),
         }
@@ -115,16 +136,23 @@ def load_dataset_rows(path: str | Path) -> list[dict[str, Any]]:
 def vectorize_rows(
     rows: list[dict[str, Any]],
     vocab: ActionVocab,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     x_rows: list[np.ndarray] = []
-    y_policy: list[int] = []
+    y_policy: list[np.ndarray] = []
     y_value: list[float] = []
+    legal_masks: list[np.ndarray] = []
+    action_indices: list[int] = []
 
     feature_dim: int | None = None
+    action_dim = len(vocab)
+    if action_dim < 1:
+        raise ValueError("Action vocabulary is empty.")
+
     for row in rows:
         key = str(row.get("action_key", ""))
         if key not in vocab.key_to_idx:
             continue
+        action_idx = vocab.encode(key)
         features_raw = row.get("features", [])
         if not isinstance(features_raw, list):
             continue
@@ -135,14 +163,35 @@ def vectorize_rows(
             feature_dim = int(features.shape[0])
         if int(features.shape[0]) != feature_dim:
             continue
+
+        legal_mask = np.ones(action_dim, dtype=np.float32)
+        legal_keys_raw = row.get("legal_action_keys", [])
+        legal_indices: list[int] = []
+        if isinstance(legal_keys_raw, list):
+            for legal_key_raw in legal_keys_raw:
+                legal_key = str(legal_key_raw)
+                if legal_key in vocab.key_to_idx:
+                    legal_indices.append(vocab.encode(legal_key))
+        if legal_indices:
+            legal_mask.fill(0.0)
+            legal_mask[np.asarray(legal_indices, dtype=np.int64)] = 1.0
+            legal_mask[action_idx] = 1.0
+
+        policy_target = np.zeros(action_dim, dtype=np.float32)
+        policy_target[action_idx] = 1.0
+
         x_rows.append(features)
-        y_policy.append(vocab.encode(key))
-        y_value.append(float(row.get("value_target", 0.5)))
+        y_policy.append(policy_target)
+        y_value.append(float(row.get("value_target", 0.0)))
+        legal_masks.append(legal_mask)
+        action_indices.append(action_idx)
 
     if not x_rows:
         raise ValueError("No valid rows after vectorization.")
 
     x = np.stack(x_rows).astype(np.float32)
-    y_pi = np.asarray(y_policy, dtype=np.int64)
+    y_pi = np.stack(y_policy).astype(np.float32)
     y_v = np.asarray(y_value, dtype=np.float32)
-    return x, y_pi, y_v
+    y_mask = np.stack(legal_masks).astype(np.float32)
+    y_action_idx = np.asarray(action_indices, dtype=np.int64)
+    return x, y_pi, y_v, y_mask, y_action_idx
